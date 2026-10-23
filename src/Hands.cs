@@ -139,9 +139,13 @@ namespace Particulas
                 }
                 lock (gate) { latest = frame; stamp = clock.Elapsed.TotalSeconds; }
                 Interlocked.Increment(ref framesReceived);
-                if (!ready) { ready = true; status = "câmera ativa"; }
+                if (!ready) { ready = true; status = "câmera ativa"; }   // (normalmente o "OK" já chegou antes)
             }
-            else if (line.StartsWith("OK")) { ready = true; status = line.Contains("simulacao") ? "simulação" : "câmera ativa"; }
+            else if (line.StartsWith("OK"))
+            {
+                ready = true;
+                status = line.Contains("simulacao") ? "simulação" : (line.Contains("perfil") ? "câmera ativa (perfil pessoal)" : "câmera ativa");
+            }
             else if (line.StartsWith("S ")) simTruth = line.Substring(2).Trim();
             else if (line.StartsWith("ERR ")) Fail(line.Substring(4));
         }

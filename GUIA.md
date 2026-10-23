@@ -25,7 +25,7 @@ sozinha (uns 5 segundos). Há **três jeitos** de formar objetos:
 | Flor | mindinho sozinho | letra W |
 | Raio | 🤘 Rock (indicador + mindinho, polegar dobrado) | letra Z |
 | **Rosquinha** | ✊✊ dois punhos | círculo duplo (2 voltas) |
-| **Átomo** (elétrons orbitando) | 🖖 Spock | 8 em pé |
+| **Átomo** (elétrons orbitando) | 🖖 Spock, ou **duas mãos em L** (moldura) | 8 em pé |
 | **Terra** (com a Lua) | ✌️✌️ duas mãos em V | arco ∩ |
 | **Diamante** | L (polegar + indicador) | losango ◇ |
 | **Árvore de Natal** | (só por traço) | chapéu ^ |
@@ -84,14 +84,40 @@ Teclado: `H` abre o guia na tela (2 páginas) e `Q`/`Esc` sai.
 - O tempo para confirmar se ajusta à certeza: ~0,3 s quando a pose está clara e ~0,6 s
   quando está duvidosa. O painel mostra a confiança em %.
 
-Em testes com mãos sintéticas "difíceis" (dedos relaxados, mão inclinada, ruído), a pose
-correta ficou estável em 97% do tempo (antes 70%), e a forma errada disparou bem menos.
+Os dedos são medidos por **distâncias e ângulos de base longa** (alcance do dedo, ponta até
+a palma), que resistem ao erro de profundidade da câmera. Em testes com mãos sintéticas
+"realistas" (esquerda/direita, costas da mão, tamanhos diferentes, ruído de profundidade),
+a pose correta fica estável em 100% do tempo, com zero trocas indevidas.
+
+## Calibração pessoal (recomendado, ~2 minutos)
+
+Cada mão é diferente: tem gente que não estica totalmente os dedos, que fecha o punho
+frouxo ou que abre pouco o polegar. Dê dois cliques em **`calibrar.bat`** (com o
+Particulas.exe fechado). Uma janela com a câmera pede as 17 poses, uma de cada vez: 3 s
+para se preparar e 3 s gravando.
+
+- Embaixo da imagem, um painel mostra **cada dedo ao vivo**: LEVANTAR/DOBRAR, em **verde** quando está
+  certo e **vermelho** quando precisa ajustar. Ao ficar tudo verde aparece "POSE CERTA!".
+- Pose que não conferir durante a gravação é repetida automaticamente uma vez.
+- Nas próximas vezes, o calibrar.bat pede **só as poses que ainda não conferiram**
+  (para refazer todas: `calibrar.bat --tudo`). Poses feitas de outro jeito (um dedo no
+  estado oposto) ficam de fora da calibração e são listadas para refazer.
+- Grava **só os números** dos 21 pontos da mão, **nunca imagens**.
+- Ao final, o programa aprende os seus limiares e **valida de forma honesta**: calibra
+  com metade dos quadros e mede na outra metade. Mostra o antes e o depois, e só salva o
+  perfil se ele melhorar o reconhecimento.
+- O perfil fica em `%LOCALAPPDATA%\Particulas\perfil.json`. O app passa a usá-lo e mostra
+  "câmera ativa (perfil pessoal)". Para voltar ao padrão, apague esse arquivo.
+
+Nos testes com mãos simuladas fora do padrão, a calibração levou o "punho frouxo" de 74%
+para 100%, o "polegar pouco aberto" de 87% para 100% e um caso extremo de 80% para 97%.
 
 ## Dicas para a câmera reconhecer bem
 
 - Fique a uns **40–80 cm** da câmera, com a **palma virada para ela** e boa luz.
 - Segure a pose com calma até a barra encher. O painel mostra o nome da pose lida.
-- **Spock:** separe bem o médio do anelar (formando um V entre eles).
+- **Spock:** separe bem o médio do anelar (formando um V entre eles). Se não conseguir
+  (muita gente não consegue), use **duas mãos em L** para o Átomo.
 - **L / Pistola:** abra bem o polegar para o lado. Com o polegar dobrado, vira 1 dedo / V.
 - **Desenho no ar:** faça traços grandes e solte a pinça no final.
 
@@ -115,7 +141,9 @@ Para recompilar o `.exe`, use `build.bat` (usa o compilador C# que já vem no Wi
 | `Particulas.exe --verificar-fundo` | mede se o céu atrapalha as figuras (contraste, estrelas no contorno e nos vãos) |
 | `Particulas.exe --exportar-png arquivo.png` | salva uma imagem com 6 figuras como aparecem no terminal |
 | `Particulas.exe --preview` | imprime uma prévia em texto das 18 formas |
-| `…\python.exe maos.py --autoteste` | testa o classificador de poses com mãos sintéticas |
+| `…\python.exe maos.py --autoteste` | testa o classificador com mãos sintéticas normais, difíceis e realistas (esquerda/direita, costas, tamanhos, ruído de profundidade), com metas |
+| `…\python.exe maos.py --avaliar coleta.jsonl` | mede o reconhecimento numa coleta gravada (padrão × perfil pessoal) |
+| `…\python.exe maos.py --calibrar coleta.jsonl` | refaz o perfil pessoal a partir de uma coleta |
 | `…\python.exe maos.py --modelo …\hand_landmarker.task --debug` | janela da câmera com a pose escrita sobre a mão |
 
 (`…\python.exe` = `%LOCALAPPDATA%\Particulas\venv\Scripts\python.exe`)

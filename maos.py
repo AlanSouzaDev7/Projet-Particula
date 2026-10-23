@@ -23,7 +23,11 @@ Como a pose é decidida:
 Uso isolado:
   python maos.py --modelo hand_landmarker.task --debug     janela com a câmera e as poses
   python maos.py --modelo hand_landmarker.task --teste 5   roda 5 s e mostra estatísticas
+  python maos.py --modelo hand_landmarker.task --coletar   coleta guiada + calibração pessoal
+  python maos.py --avaliar coleta.jsonl                    mede o reconhecimento numa coleta
+  python maos.py --calibrar coleta.jsonl                   (re)calibra o perfil pessoal
   python maos.py --autoteste                               testa o classificador com mãos sintéticas
+  python maos.py --simular                                 sem câmera: mãos sintéticas no protocolo
 """
 import argparse
 import math
@@ -77,10 +81,12 @@ def joint_bend(a, b, c):
 
 
 def finger_bend(w, f):
+    """Curvatura do dedo com vetores LONGOS (base→meio e meio→ponta), em graus. Ângulos entre
+    segmentos curtos (2–4 cm) explodem com o ruído de profundidade do MediaPipe."""
     mcp, pip, dip, tip = FINGERS[f]
-    return (0.5 * joint_bend(w[WRIST], w[mcp], w[pip])
-            + joint_bend(w[mcp], w[pip], w[dip])
-            + joint_bend(w[pip], w[dip], w[tip]))
+    return (angle_between(sub(w[pip], w[mcp]), sub(w[tip], w[pip]))
+            + 0.5 * angle_between(sub(w[mcp], w[WRIST]), sub(w[pip], w[mcp])))
+
 
 
 def soft(value, center, width):
@@ -152,55 +158,110 @@ POSE_SPECS = {
 }
 
 
-def hand_features(w, img, state):
-    """Probabilidades (0..1) de cada detalhe da mão, a partir dos pontos 3D (metros) e de imagem."""
+def raw_measures(w, img):
+    """Medidas geométricas da mão (sem decidir nada). Usadas pela classificação e pela
+    calibração pessoal, que aprende os limiares a partir delas."""
     palm = dist(w[WRIST], w[9]) or 1e-6
     palm_w = dist(w[5], w[17]) or 1e-6
-    f = {}
+    m = {}
 
-    # Dedos: ângulo das juntas (principal) + ponta longe do pulso (confirma)
-    ext = []
+    # Dedos: três medidas de base longa (robustas ao ruído de profundidade):
+    #   alcance     = distância base→ponta / comprimento do dedo (1 = reto)
+    #   ponta-palma = distância da ponta ao centro da palma, em palmos
+    #   curvatura   = ângulo entre base→meio e meio→ponta
+    center = tuple(sum(w[j][k] for j in (0, 5, 9, 13, 17)) / 5 for k in range(3))
     for name in FINGERS:
         mcp, pip, dip, tip = FINGERS[name]
-        bend = finger_bend(w, name)
-        ratio = dist(w[WRIST], w[tip]) / (dist(w[WRIST], w[pip]) or 1e-6)
-        ext.append(0.65 * soft(-bend, -85, 12) + 0.35 * soft(ratio, 1.12, 0.05))
-    f["ext"] = ext
+        length = dist(w[mcp], w[pip]) + dist(w[pip], w[dip]) + dist(w[dip], w[tip]) or 1e-6
+        m["reach_" + name] = dist(w[mcp], w[tip]) / length
+        m["tip_palm_" + name] = dist(w[tip], center) / palm
+        m["bend_" + name] = finger_bend(w, name)
 
-    # Polegar: esticado = ponta para FORA da palma (além do indicador, no eixo lateral)
-    # ou bem longe do centro da palma; e o próprio polegar razoavelmente reto
-    thumb_bend = joint_bend(w[1], w[2], w[3]) + joint_bend(w[2], w[3], w[4])
-    lateral = dot(sub(w[4], w[5]), unit(sub(w[5], w[17]))) / palm_w
-    out = dist(w[4], w[9]) / palm
-    straight = soft(-thumb_bend, -65, 12)
-    f["thumb"] = max(soft(lateral, 0.3, 0.1), soft(out, 0.9, 0.08)) * (0.35 + 0.65 * straight)
-    f["spread"] = soft(angle_between(sub(w[4], w[2]), sub(w[8], w[5])), 42, 6)
+    # Polegar: posição lateral (fora da palma, além do indicador) e distância ao centro
+    m["thumb_lateral"] = dot(sub(w[4], w[5]), unit(sub(w[5], w[17]))) / palm_w
+    m["thumb_out"] = dist(w[4], w[9]) / palm
+    m["thumb_spread"] = angle_between(sub(w[4], w[2]), sub(w[8], w[5]))
+    m["pinch"] = dist(w[4], w[8]) / palm
 
-    # Pinça (com histerese): pontas do polegar e do indicador juntas, indicador só meio dobrado
-    d = dist(w[4], w[8]) / palm
-    thr = 0.45 if state.pinching else 0.3
-    f["pinch"] = soft(-d, -thr, 0.04) * soft(-finger_bend(w, "indicador"), -140, 10)
-    state.pinching = f["pinch"] > 0.5
-
-    # Spock: médio e anelar bem separados no plano da palma, os pares vizinhos juntos
-    pn = unit((lambda u, v: (u[1] * v[2] - u[2] * v[1], u[2] * v[0] - u[0] * v[2], u[0] * v[1] - u[1] * v[0]))(
-        sub(w[5], w[WRIST]), sub(w[17], w[WRIST])))
+    # Spock: abertura médio-anelar no plano da palma (plano por vetores longos; direção de
+    # cada dedo pela média de três articulações) e razão entre as distâncias das pontas
+    across = sub(w[5], w[17])
+    along = sub(tuple(sum(w[j][k] for j in (5, 9, 13, 17)) / 4 for k in range(3)), w[WRIST])
+    pn = unit((across[1] * along[2] - across[2] * along[1], across[2] * along[0] - across[0] * along[2],
+               across[0] * along[1] - across[1] * along[0]))
     dirs = []
     for name in FINGERS:
-        r = sub(w[FINGERS[name][3]], w[FINGERS[name][0]])
+        mcp, pip, dip, tip = FINGERS[name]
+        mid = tuple((w[pip][k] + w[dip][k] + w[tip][k]) / 3 for k in range(3))
+        r = sub(mid, w[mcp])
         k = dot(r, pn)
         dirs.append((r[0] - k * pn[0], r[1] - k * pn[1], r[2] - k * pn[2]))
-    g_im, g_mr, g_rp = (angle_between(dirs[0], dirs[1]), angle_between(dirs[1], dirs[2]),
-                        angle_between(dirs[2], dirs[3]))
-    f["spock"] = soft(g_mr, 15, 2.5) * soft(g_mr - 2 * max(g_im, g_rp), 0, 2.5)
+    m["gap_im"] = angle_between(dirs[0], dirs[1])
+    m["gap_mr"] = angle_between(dirs[1], dirs[2])
+    m["gap_rp"] = angle_between(dirs[2], dirs[3])
+    m["spock_ratio"] = dist(w[12], w[16]) / ((dist(w[8], w[12]) + dist(w[16], w[20])) / 2 or 1e-6)
 
-    # Joinha / negativo: direção do polegar na imagem (0° = para cima)
+    # Joinha / negativo: direção do polegar na imagem (0° = para cima) e altura da ponta
     pl = math.hypot(img[0][0] - img[9][0], img[0][1] - img[9][1]) or 1e-6
     dx, dy = img[4][0] - img[2][0], img[4][1] - img[2][1]
-    from_up = math.degrees(math.atan2(abs(dx), -dy))
+    m["thumb_from_up"] = math.degrees(math.atan2(abs(dx), -dy))
+    m["thumb_rise"] = (img[5][1] - img[4][1]) / pl
+    return m
+
+
+# Limiares do classificador. Um perfil pessoal (calibração) pode substituir os valores.
+DEFAULT_PARAMS = {
+    "reach": 0.71, "bend": 100.0,
+    "tip_palm_indicador": 0.83, "tip_palm_medio": 0.87, "tip_palm_anelar": 0.80, "tip_palm_mindinho": 0.69,
+    "thumb_lateral": 0.25, "thumb_out": 0.83, "thumb_spread": 42.0,
+    # Pinça: numa mão real as POLPAS se encostam e as pontas (onde o MediaPipe marca) ficam a
+    # ~3–4 cm, ~0,4 palmo; o indicador curvado distingue do punho
+    "pinch": 0.45, "pinch_release": 0.62, "pinch_index_bend": 115.0,
+    "spock_gap": 14.0, "spock_ratio": 1.35,
+    "thumb_up_angle": 48.0,
+}
+PARAMS = dict(DEFAULT_PARAMS)
+
+
+def load_profile(path):
+    """Carrega um perfil pessoal (JSON) por cima dos limiares padrão. Devolve True se carregou."""
+    import json
+    try:
+        with open(path, encoding="utf-8") as fh:
+            data = json.load(fh)
+    except (OSError, ValueError):
+        return False
+    PARAMS.clear()
+    PARAMS.update(DEFAULT_PARAMS)
+    PARAMS.update({k: float(v) for k, v in data.get("params", {}).items() if k in DEFAULT_PARAMS})
+    return True
+
+
+def hand_features(w, img, state):
+    """Probabilidades (0..1) de cada detalhe da mão, a partir dos pontos 3D (metros) e de imagem."""
+    m, P = raw_measures(w, img), PARAMS
+    f = {}
+    # Cada dedo: média das três medidas longas — se uma falhar num quadro, as outras seguram
+    f["ext"] = [(soft(m["reach_" + n], P["reach"], 0.03) + soft(m["tip_palm_" + n], P["tip_palm_" + n], 0.05)
+                 + soft(-m["bend_" + n], -P["bend"], 8)) / 3 for n in FINGERS]
+    # Polegar (a "dobra" do polegar se mostrou pouco confiável e não entra)
+    f["thumb"] = 0.5 * soft(m["thumb_lateral"], P["thumb_lateral"], 0.08) + 0.5 * soft(m["thumb_out"], P["thumb_out"], 0.05)
+    f["spread"] = soft(m["thumb_spread"], P["thumb_spread"], 6)
+
+    # Pinça (com histerese): pontas do polegar e do indicador juntas, indicador só meio dobrado
+    # (no punho as pontas também se encostam, mas o indicador está todo enrolado)
+    thr = P["pinch_release"] if state.pinching else P["pinch"]
+    f["pinch"] = soft(-m["pinch"], -thr, 0.04) * soft(-m["bend_indicador"], -P["pinch_index_bend"], 8)
+    state.pinching = f["pinch"] > 0.5
+
+    by_angle = (soft(m["gap_mr"], P["spock_gap"], 2.5)
+                * soft(m["gap_mr"] - 1.8 * max(m["gap_im"], m["gap_rp"]), 0, 3))
+    f["spock"] = 0.5 * by_angle + 0.5 * soft(m["spock_ratio"], P["spock_ratio"], 0.1)
+
     # Tolerante: na prática o joinha sai bem inclinado (até ~45-50°)
-    f["up"] = soft(-from_up, -48, 8) * soft((img[5][1] - img[4][1]) / pl, 0.15, 0.08)
-    f["down"] = soft(from_up, 132, 8) * soft((img[4][1] - img[5][1]) / pl, 0.15, 0.08)
+    a = P["thumb_up_angle"]
+    f["up"] = soft(-m["thumb_from_up"], -a, 8) * soft(m["thumb_rise"], 0.15, 0.08)
+    f["down"] = soft(m["thumb_from_up"], 180 - a, 8) * soft(-m["thumb_rise"], 0.15, 0.08)
     return f
 
 
@@ -273,6 +334,7 @@ DUO_FROM_PAIR = {
     ("v", "v"): "dois-v",
     ("punho", "punho"): "dois-punhos",
     ("aberta", "aberta"): "duas-abertas",
+    ("L", "L"): "dois-L",                       # "moldura": alternativa fácil ao Spock para o Átomo
 }
 
 
@@ -369,6 +431,492 @@ def simulate(seconds_per_pose=1.5, fps=30):
     return 0
 
 
+# ---- coleta guiada, avaliação e calibração pessoal ----------------------------------
+# A coleta grava só NÚMEROS (os 21 pontos 3D e de imagem de cada quadro), nunca imagens.
+POSE_HELP = {   # textos sem acento: a fonte do OpenCV não desenha acentos
+    "aberta": "mao aberta, 5 dedos esticados", "quatro": "4 dedos, polegar dobrado na palma",
+    "spock": "Spock: medio e anelar separados", "punho": "punho fechado",
+    "joinha": "joinha (polegar para cima)", "negativo": "negativo (polegar para baixo)",
+    "indicador": "so o indicador levantado", "L": "L: polegar e indicador abertos",
+    "v": "V: indicador e medio", "pistola": "pistola: polegar, indicador e medio",
+    "tres": "3 dedos: indicador, medio e anelar", "rock": "rock: indicador e mindinho",
+    "teamo": "eu te amo: polegar, indicador e mindinho", "hangloose": "hang loose: polegar e mindinho",
+    "mindinho": "so o mindinho levantado", "ok": "OK: polegar e indicador em circulo",
+    "pinca": "pinca: polegar e indicador juntos, resto dobrado",
+}
+
+
+PANEL_NAMES = ("POLEGAR", "INDICADOR", "MEDIO", "ANELAR", "MINDINHO")
+
+
+def draw_finger_panel(cv2, frame, pose, states, w, h, extra_ok=None):
+    """Painel com os 5 dedos: o que a pose pede (LEVANTAR / DOBRAR / tanto faz) e, ao vivo,
+    se a câmera está vendo cada dedo certo (verde) ou errado (vermelho)."""
+    spec = POSE_SPECS[pose]
+    top, cell = h - 40 - 62, (w - 20) // 5
+    cv2.rectangle(frame, (0, top - 6), (w, h - 40), (25, 25, 35), -1)
+    for i, (name, want) in enumerate(zip(PANEL_NAMES, spec)):
+        x0 = 10 + i * cell
+        if want is None:
+            label, color = "tanto faz", (130, 130, 130)
+        else:
+            label = "LEVANTAR" if want else "DOBRAR"
+            st = None if states is None else states[i]
+            color = (130, 130, 130) if st is None else ((90, 210, 90) if st else (70, 70, 230))
+        cv2.rectangle(frame, (x0, top), (x0 + cell - 8, top + 52), color, 2 if states is None else -1)
+        text_color = (255, 255, 255) if states is not None and want is not None else (200, 200, 200)
+        cv2.putText(frame, name, (x0 + 6, top + 20), cv2.FONT_HERSHEY_SIMPLEX, 0.45, text_color, 1)
+        cv2.putText(frame, label, (x0 + 6, top + 42), cv2.FONT_HERSHEY_SIMPLEX, 0.5, text_color, 2)
+    # Dica do detalhe extra, colorida ao vivo: verde = feito, vermelho = ainda não
+    hint_color = (120, 230, 255) if extra_ok is None else ((90, 230, 90) if extra_ok else (80, 80, 255))
+    if pose in ("ok", "pinca"):
+        cv2.putText(frame, "encoste a ponta do polegar na ponta do indicador", (10, top - 14),
+                    cv2.FONT_HERSHEY_SIMPLEX, 0.55, hint_color, 2)
+    elif pose == "spock":
+        cv2.putText(frame, "V entre medio e anelar: indicador+medio | anelar+mindinho", (10, top - 14),
+                    cv2.FONT_HERSHEY_SIMPLEX, 0.55, hint_color, 2)
+
+
+def collect(args):
+    """Janela com a câmera: pede cada pose (6 s para ler e preparar, 3 s gravando) e salva os pontos."""
+    import json
+    import cv2
+    import mediapipe as mp
+    from mediapipe.tasks.python import BaseOptions, vision
+
+    path = args.coletar if args.coletar != "auto" else os.path.join(
+        os.path.dirname(os.path.abspath(args.modelo)), time.strftime("coleta-%Y%m%d-%H%M%S.jsonl"))
+    cam = Camera(args.camera)
+    if not cam.ok:
+        print("Não consegui abrir a câmera (feche o Particulas.exe se estiver aberto).")
+        return 3
+    landmarker = vision.HandLandmarker.create_from_options(vision.HandLandmarkerOptions(
+        base_options=BaseOptions(model_asset_path=args.modelo), running_mode=vision.RunningMode.VIDEO,
+        num_hands=1, min_hand_detection_confidence=0.6, min_hand_presence_confidence=0.5,
+        min_tracking_confidence=0.5))
+    title = "Coleta de gestos - Particulas (ESPACO grava ja, R repete a pose, Esc cancela)"
+    folder = os.path.dirname(os.path.abspath(path))
+    # Só as poses que ainda não têm uma gravação conferida (ou todas, com --tudo)
+    previous = collection_files(folder)
+    if getattr(args, "tudo", False) or not previous:
+        poses = list(POSES)
+    else:
+        chosen, _, _ = best_frames(previous)
+        poses = [p for p in POSES if p not in chosen]
+        if not poses:
+            print("Todas as poses já têm gravação conferida. Use --tudo para refazer todas.")
+            cam.close()
+            return calibrate(previous, os.path.join(folder, "perfil.json"))
+        print("Poses pendentes (as outras já conferiram numa coleta anterior): %s" % ", ".join(poses))
+    t0, seq, last_ts, saved = time.monotonic(), 0, -1, 0
+    PREP, REC = 6.0, 3.0      # segundos para ler/preparar e para gravar cada pose
+    attempts, notice = Counter(), ""
+    with open(path, "w", encoding="utf-8") as fh:
+        k = 0
+        while k < len(poses):
+            # Os quadros da pose ficam em memória e só vão para o arquivo quando ela termina:
+            # se a pessoa apertar R, a tentativa errada é descartada
+            pose, phase_start, buffer, repeat = poses[k], time.monotonic(), [], False
+            attempts[pose] += 1
+            live_state, matched, checked, all_ok = HandState(), 0, 0, False
+            # A gravação só começa quando a pose está certa (tudo verde por 0,4 s), para não
+            # gravar a mão ainda chegando na pose; se não acertar em 6 s, grava assim mesmo
+            rec_start, green_since, WAIT_MAX = None, None, 6.0
+            while True:
+                frame, seq2 = cam.latest(seq)
+                if frame is None or seq2 == seq:
+                    continue
+                seq = seq2
+                frame = cv2.flip(frame, 1)
+                h, w = frame.shape[:2]
+                ts = max(int((time.monotonic() - t0) * 1000), last_ts + 1)
+                last_ts = ts
+                res = landmarker.detect_for_video(
+                    mp.Image(image_format=mp.ImageFormat.SRGB, data=cv2.cvtColor(frame, cv2.COLOR_BGR2RGB)), ts)
+                now = time.monotonic()
+                elapsed = now - phase_start
+                recording = rec_start is not None and now - rec_start < REC
+                has_hand = bool(res.hand_landmarks)
+                states, extra_ok = None, None
+                if has_hand:
+                    hand = res.hand_landmarks[0]
+                    world = res.hand_world_landmarks[0]
+                    for p in hand:
+                        cv2.circle(frame, (int(p.x * w), int(p.y * h)), 3, (0, 255, 255), -1)
+                    # Conferência ao vivo de cada dedo contra a definição da pose
+                    wpts = [(p.x, p.y, p.z) for p in world]
+                    feats = hand_features(wpts, [(p.x, p.y * h / w) for p in hand], live_state)
+                    probs = [feats["thumb"]] + feats["ext"]
+                    states = [None if want is None else ((pr > 0.5) == bool(want))
+                              for want, pr in zip(POSE_SPECS[pose], probs)]
+                    # Detalhe extra da pose: pinça encostada (OK/pinça) ou V entre médio e anelar (Spock)
+                    extra_ok = (feats["pinch"] > 0.5 if pose in ("ok", "pinca")
+                                else feats["spock"] > 0.5 if pose == "spock" else None)
+                    all_ok = all(s is not False for s in states) and extra_ok is not False
+                else:
+                    all_ok, extra_ok = False, None
+                if elapsed >= PREP and rec_start is None:
+                    green_since = (green_since or now) if all_ok else None
+                    if (green_since is not None and now - green_since >= 0.4) or elapsed >= PREP + WAIT_MAX:
+                        rec_start = now
+                        recording = True
+                if has_hand:
+                    if recording:
+                        checked += 1
+                        matched += all_ok
+                        side = res.handedness[0][0].category_name[:1] if res.handedness and res.handedness[0] else "?"
+                        buffer.append(json.dumps({"pose": pose, "side": side, "aspect": h / w,
+                                                  "world": [[round(p.x, 5), round(p.y, 5), round(p.z, 5)] for p in world],
+                                                  "img": [[round(p.x, 4), round(p.y, 4)] for p in hand]}))
+                # Faixa de instruções: número da pose, nome e descrição em letras grandes
+                cv2.rectangle(frame, (0, 0), (w, 96), (25, 25, 35), -1)
+                cv2.putText(frame, "Pose %d de %d:  %s" % (k + 1, len(poses), pose.upper()), (14, 34),
+                            cv2.FONT_HERSHEY_SIMPLEX, 0.95, (255, 255, 255), 2)
+                cv2.putText(frame, POSE_HELP[pose], (14, 72), cv2.FONT_HERSHEY_SIMPLEX, 0.85, (120, 230, 255), 2)
+                draw_finger_panel(cv2, frame, pose, states, w, h, extra_ok)
+                if elapsed < PREP:
+                    left = int(math.ceil(PREP - elapsed))
+                    cv2.putText(frame, str(left), (w // 2 - 30, h // 2), cv2.FONT_HERSHEY_SIMPLEX, 3.0, (120, 200, 255), 6)
+                    if notice:
+                        cv2.putText(frame, notice, (14, 130), cv2.FONT_HERSHEY_SIMPLEX, 0.8, (80, 160, 255), 2)
+                    if has_hand and all_ok:
+                        msg, color = "POSE CERTA! segure assim... (ESPACO grava ja)", (120, 255, 120)
+                    else:
+                        msg, color = "acerte os dedos em vermelho...", (120, 200, 255)
+                elif rec_start is None:
+                    wait_left = int(math.ceil(PREP + WAIT_MAX - elapsed))
+                    msg, color = "aguardando a pose certa para gravar... (%d s)" % wait_left, (80, 200, 255)
+                elif recording:
+                    msg, color = "GRAVANDO - segure a pose (%d quadros)%s" % (
+                        len(buffer), "" if has_hand else " - mostre a mao!"), (60, 60, 255)
+                else:
+                    msg, color = "ok!", (120, 255, 120)
+                cv2.rectangle(frame, (0, h - 40), (w, h), (25, 25, 35), -1)
+                cv2.putText(frame, msg, (14, h - 13), cv2.FONT_HERSHEY_SIMPLEX, 0.65, color, 2)
+                cv2.imshow(title, frame)
+                key = cv2.waitKey(1) & 0xFF
+                if key == 27:
+                    cam.close()
+                    cv2.destroyAllWindows()
+                    print("Coleta cancelada. %d quadros salvos em %s" % (saved, path))
+                    return 1
+                if key in (ord("r"), ord("R")):
+                    repeat = True
+                    break
+                if key == 32 and elapsed < PREP:              # ESPAÇO: já está pronto, grava assim que estiver certa
+                    phase_start = time.monotonic() - PREP
+                if rec_start is not None and now - rec_start >= REC + 0.5:
+                    break
+            notice = ""
+            # Gravação em que a pose não conferiu na maior parte do tempo: repete uma vez
+            if not repeat and checked and matched < 0.5 * checked and attempts[pose] < 2:
+                repeat, notice = True, "Nao conferiu - vamos repetir esta pose"
+            if not repeat:
+                for line in buffer:
+                    fh.write(line + "\n")
+                fh.flush()
+                saved += len(buffer)
+                k += 1
+    cam.close()
+    cv2.destroyAllWindows()
+    print("Coleta concluída: %d quadros em %s" % (saved, path))
+    folder = os.path.dirname(os.path.abspath(path))
+    return calibrate(collection_files(folder), os.path.join(folder, "perfil.json"))
+
+
+def load_frames(path):
+    import json
+    frames = []
+    with open(path, encoding="utf-8") as fh:
+        for line in fh:
+            line = line.strip()
+            if line:
+                d = json.loads(line)
+                if d.get("pose") in POSES:
+                    frames.append(d)
+    return frames
+
+
+def frame_points(d):
+    aspect = d.get("aspect", 0.75)
+    world = [tuple(p) for p in d["world"]]
+    img = [(p[0], p[1] * aspect) for p in d["img"]]
+    return world, img
+
+
+# Quadros descartados no início e no fim de cada pose gravada (a mão ainda chegando ou já
+# saindo da pose): janela FIXA de tempo, cega ao resultado — ~0,8 s e ~0,5 s a 15 quadros/s
+TRIM_START, TRIM_END = 12, 8
+
+
+def trimmed(seq):
+    return seq[TRIM_START:len(seq) - TRIM_END] if len(seq) > TRIM_START + TRIM_END + 10 else seq
+
+
+def replay(frames, trim=True):
+    """Reproduz quadros gravados pelo caminho do app (suavização + classificação + fusão),
+    pose por pose. Devolve métricas e confusões. trim=True ignora nas métricas as bordas
+    de cada pose (a mão ainda chegando/saindo), mas os quadros passam pela fusão."""
+    by_pose = {}
+    for d in frames:
+        by_pose.setdefault(d["pose"], []).append(d)
+    raw_ok = stable_ok = counted = total = wrong = 0
+    per_pose, confusion = {}, Counter()
+    for pose, seq in by_pose.items():
+        state, good, n = HandState(), 0, 0
+        first, last = (TRIM_START, len(seq) - TRIM_END) if trim and len(seq) > TRIM_START + TRIM_END + 10 else (6, len(seq))
+        for k, d in enumerate(seq):
+            world, img = frame_points(d)
+            world = state.smooth_world(world)
+            raw, _, _, scores = classify(world, img, state)
+            stable = state.fuse(scores)[0]
+            total += 1
+            raw_ok += raw == pose
+            if first <= k < last:
+                counted += 1
+                n += 1
+                good += stable == pose
+                stable_ok += stable == pose
+                if stable not in (pose, "outra"):
+                    wrong += 1
+                if stable != pose:
+                    confusion[(pose, stable)] += 1
+        per_pose[pose] = 100.0 * good / max(1, n)
+    return {"raw": 100.0 * raw_ok / max(1, total), "stable": 100.0 * stable_ok / max(1, counted),
+            "wrong": 100.0 * wrong / max(1, counted), "per_pose": per_pose, "confusion": confusion}
+
+
+def truth_of(pose):
+    """Estados verdadeiros de uma pose para a calibração: polegar, dedos, pinça, Spock."""
+    fingers_ext, thumb_mode, _ = POSES[pose]
+    thumb = None if thumb_mode == "pinch" else (0 if thumb_mode == "fold" else 1)
+    fingers = {}
+    for f in FINGERS:
+        fingers[f] = None if (thumb_mode == "pinch" and f == "indicador") else (1 if LETTER[f] in fingers_ext else 0)
+    return thumb, fingers
+
+
+def fit_threshold(pos, neg, default):
+    """Limiar entre duas classes de valores (pos = classe com valores MAIORES). Usa a folga
+    entre o 10º percentil de pos e o 90º de neg; se as classes se sobrepõem, o ponto médio
+    das medianas. O resultado é puxado 25% para o padrão (menos sensível a uma coleta ruim)."""
+    if len(pos) < 30 or len(neg) < 30:
+        return default, "poucos dados"
+    pos, neg = sorted(pos), sorted(neg)
+    q = lambda v, p: v[int(p * (len(v) - 1))]
+    lo, hi = q(neg, 0.9), q(pos, 0.1)
+    if hi > lo:
+        thr, note = (lo + hi) / 2, "ok"
+    else:
+        thr, note = (q(neg, 0.5) + q(pos, 0.5)) / 2, "classes se sobrepõem"
+    return default + 0.75 * (thr - default), note
+
+
+def learn_params(frames):
+    """Aprende os limiares pessoais a partir de quadros rotulados."""
+    vals = {}
+    add = lambda key, cls, v: vals.setdefault((key, cls), []).append(v)
+    for d in frames:
+        pose = d["pose"]
+        world, img = frame_points(d)
+        m = raw_measures(world, img)
+        thumb, fingers = truth_of(pose)
+        for f, t in fingers.items():
+            if t is None:
+                continue
+            add("reach", t, m["reach_" + f])
+            add("bend", 1 - t, m["bend_" + f])            # curvatura maior = dobrado
+            add("tip_palm_" + f, t, m["tip_palm_" + f])
+        if thumb is not None:
+            add("thumb_lateral", thumb, m["thumb_lateral"])
+            add("thumb_out", thumb, m["thumb_out"])
+        # Pinça = distância MENOR. Do lado "não pinça" só entram poses com o indicador esticado:
+        # no punho/mindinho a ponta do polegar também fica perto, mas a curvatura do
+        # indicador já barra esses casos
+        if pose in ("ok", "pinca"):
+            add("pinch", 0, m["pinch"])
+        elif fingers.get("indicador") == 1:
+            add("pinch", 1, m["pinch"])
+        if pose in ("spock", "aberta", "quatro"):
+            add("spock_ratio", 1 if pose == "spock" else 0, m["spock_ratio"])
+            add("spock_gap", 1 if pose == "spock" else 0, m["gap_mr"])
+        if pose in ("L", "pistola"):
+            add("thumb_spread", 1, m["thumb_spread"])
+        if pose == "joinha":
+            add("thumb_tilt", 1, m["thumb_from_up"])
+        elif pose == "negativo":
+            add("thumb_tilt", 1, 180 - m["thumb_from_up"])
+    params, notes = dict(DEFAULT_PARAMS), {}
+    for key in ("reach", "bend", "tip_palm_indicador", "tip_palm_medio", "tip_palm_anelar",
+                "tip_palm_mindinho", "thumb_lateral", "thumb_out", "pinch", "spock_ratio", "spock_gap"):
+        pos, neg = vals.get((key, 1), []), vals.get((key, 0), [])
+        params[key], notes[key] = fit_threshold(pos, neg, DEFAULT_PARAMS[key])
+    params["pinch_release"] = params["pinch"] * DEFAULT_PARAMS["pinch_release"] / DEFAULT_PARAMS["pinch"]
+    # Abertura do polegar no L/pistola: não há uma classe "contrária" natural; o limiar só
+    # desce (nunca sobe) o suficiente para aceitar ~90% do L/pistola desta pessoa
+    spread = sorted(vals.get(("thumb_spread", 1), []))
+    if len(spread) >= 30:
+        params["thumb_spread"] = max(20.0, min(DEFAULT_PARAMS["thumb_spread"], spread[len(spread) // 10] - 4))
+        notes["thumb_spread"] = "ok"
+    # Inclinação do joinha/negativo: só alarga (até 70°) para aceitar ~90% desta pessoa
+    tilt = sorted(vals.get(("thumb_tilt", 1), []))
+    if len(tilt) >= 30:
+        params["thumb_up_angle"] = min(70.0, max(DEFAULT_PARAMS["thumb_up_angle"], tilt[len(tilt) * 9 // 10] + 5))
+        notes["thumb_up_angle"] = "ok"
+    return params, notes
+
+
+def report(label, r):
+    worst = sorted(r["per_pose"].items(), key=lambda kv: kv[1])[:4]
+    print("  %-22s quadro isolado %5.1f%% | estável certo %5.1f%% | disparo errado %4.1f%% | piores: %s"
+          % (label, r["raw"], r["stable"], r["wrong"], ", ".join("%s %.0f%%" % kv for kv in worst)))
+
+
+FINGER_NAMES = ("polegar", "indicador", "médio", "anelar", "mindinho")
+
+
+def check_pose(pose, feats):
+    """Confere se a pose gravada corresponde à definição (com os limiares padrão). Devolve a
+    lista de problemas — vazia se confere. Só aponta contradições claras (um dedo no estado
+    oposto, polegar e indicador que não se encostaram): diferenças sutis de jeito de mão são
+    justamente o que a calibração aprende."""
+    med = lambda vals: sorted(vals)[len(vals) // 2]
+    spec = POSE_SPECS[pose]
+    probs = [med([f["thumb"] for f in feats])] + [med([f["ext"][i] for f in feats]) for i in range(4)]
+    problems = []
+    for name, want, p in zip(FINGER_NAMES, spec, probs):
+        if want is None:
+            continue
+        limit = 0.7 if name == "polegar" else 0.6          # o polegar é o sinal mais incerto
+        if abs(p - want) > limit:
+            problems.append("%s deveria estar %s" % (name, "esticado" if want else "dobrado"))
+    if pose in ("ok", "pinca") and med([f["pinch"] for f in feats]) < 0.3:
+        problems.append("polegar e indicador não se encostaram")
+    if pose == "spock" and med([f["spock"] for f in feats]) < 0.2:
+        problems.append("médio e anelar não ficaram separados (faça um V entre eles)")
+    return problems
+
+
+def check_poses(frames):
+    """{pose: problemas} para cada pose da coleta (com os limiares padrão)."""
+    saved = dict(PARAMS)
+    PARAMS.clear(); PARAMS.update(DEFAULT_PARAMS)
+    by_pose = {}
+    for d in frames:
+        by_pose.setdefault(d["pose"], []).append(d)
+    result = {}
+    for pose, seq in by_pose.items():
+        feats = [hand_features(*frame_points(d), HandState()) for d in seq]
+        result[pose] = check_pose(pose, feats)
+    PARAMS.clear(); PARAMS.update(saved)
+    return result
+
+
+def collection_files(folder):
+    """Coletas completas da pasta, da mais antiga para a mais recente."""
+    names = [n for n in os.listdir(folder) if n.startswith("coleta-") and n.endswith(".jsonl") and "incompleta" not in n]
+    return [os.path.join(folder, n) for n in sorted(names)]
+
+
+def best_frames(paths):
+    """Para cada pose, os quadros da coleta MAIS RECENTE em que ela conferiu com a definição.
+    Permite refazer só as poses com problema sem repetir tudo."""
+    chosen, origin, problems = {}, {}, {}
+    for path in paths:
+        frames = load_frames(path)
+        checks = check_poses(frames)
+        for pose, probs in checks.items():
+            if probs:
+                if pose not in chosen:
+                    problems[pose] = probs
+                continue
+            chosen[pose] = [d for d in frames if d["pose"] == pose]
+            origin[pose] = os.path.basename(path)
+            problems.pop(pose, None)
+    return chosen, origin, problems
+
+
+def remove_profile(profile_path, why):
+    if os.path.exists(profile_path):
+        os.remove(profile_path)
+        print("Perfil pessoal anterior removido (%s); usando os limiares padrão." % why)
+
+
+def calibrate(paths, profile_path):
+    """Calibra com metade dos quadros de cada pose e valida na outra metade (honesto), depois
+    salva o perfil aprendido com todos os quadros. Só entram poses que conferem com a
+    definição; as que não conferem são listadas para refazer."""
+    import json
+    if isinstance(paths, str):
+        paths = [paths]
+    chosen, origin, problems = best_frames(paths)
+    if problems:
+        print("Poses que NÃO conferiram (ficaram de fora da calibração — refaça só estas):")
+        for pose in POSES:
+            if pose in problems:
+                print("  %-10s %s" % (pose, "; ".join(problems[pose])))
+    ok_poses = [p for p in POSES if p in chosen]
+    print("Poses que conferiram: %d de %d" % (len(ok_poses), len(POSES)))
+    frames = [d for p in ok_poses for d in trimmed(chosen[p])]       # sem as bordas de cada pose
+    if len(ok_poses) < 8 or len(frames) < 200:
+        print("Poses certas insuficientes para calibrar com segurança.")
+        remove_profile(profile_path, "coleta insuficiente")
+        return 1
+    train, test = [], []
+    for p in ok_poses:
+        # Tira as bordas (mão chegando/saindo) e divide o resto: 1ª metade aprende, 2ª valida
+        seq = trimmed(chosen[p])
+        half = len(seq) // 2
+        train += seq[:half]
+        test += seq[half:]
+    PARAMS.clear(); PARAMS.update(DEFAULT_PARAMS)
+    before = replay(test, trim=False)
+    learned, notes = learn_params(train)
+    PARAMS.clear(); PARAMS.update(learned)
+    after = replay(test, trim=False)
+    print("Validação nas poses que conferiram (calibra com metade dos quadros, mede na outra metade):")
+    report("padrão", before)
+    report("com perfil pessoal", after)
+    final, notes = learn_params(frames)
+    gain = after["stable"] - before["stable"]
+    keep = gain >= 0.5 and after["wrong"] <= before["wrong"] + 0.5
+    PARAMS.clear(); PARAMS.update(DEFAULT_PARAMS)
+    if not keep:
+        print("O perfil pessoal não trouxe ganho claro; os limiares padrão já servem para a sua mão.")
+        remove_profile(profile_path, "sem ganho")
+        return 0
+    with open(profile_path, "w", encoding="utf-8") as fh:
+        json.dump({"params": final, "notes": notes, "frames": len(frames), "poses": ok_poses,
+                   "sources": origin, "created": time.strftime("%Y-%m-%d %H:%M")},
+                  fh, ensure_ascii=False, indent=2)
+    print("Perfil pessoal salvo em %s (o Particulas.exe passa a usá-lo)." % profile_path)
+    overlap = [k for k, v in notes.items() if v != "ok"]
+    if overlap:
+        print("Atenção, sinais pouco separados na sua coleta: %s" % ", ".join(overlap))
+    return 0
+
+
+def evaluate_file(path, profile_path):
+    """Mede o reconhecimento numa coleta (arquivo) ou numa pasta de coletas — nesse caso só
+    nas poses que conferiram (a gravação mais recente certa de cada uma)."""
+    if os.path.isdir(path):
+        chosen, origin, problems = best_frames(collection_files(path))
+        frames = [d for p in POSES if p in chosen for d in chosen[p]]
+        print("%d poses conferidas (%d quadros) nas coletas de %s%s" % (
+            len(chosen), len(frames), path, "; fora: " + ", ".join(problems) if problems else ""))
+    else:
+        frames = load_frames(path)
+        print("%d quadros de %d poses em %s" % (len(frames), len({d['pose'] for d in frames}), path))
+    PARAMS.clear(); PARAMS.update(DEFAULT_PARAMS)
+    report("padrão", replay(frames))
+    if profile_path and load_profile(profile_path):
+        r = replay(frames)
+        report("com perfil pessoal", r)
+        for (want, got), c in r["confusion"].most_common(5):
+            print("    %s -> %s: %d quadros" % (want, got, c))
+    return 0
+
+
 # ---- câmera em thread própria: sempre o quadro mais recente (menos latência) -------
 class Camera:
     def __init__(self, index):
@@ -416,14 +964,32 @@ def main():
     ap.add_argument("--teste", type=float, default=0, help="roda N segundos e sai (diagnóstico)")
     ap.add_argument("--autoteste", action="store_true", help="testa o classificador com mãos sintéticas")
     ap.add_argument("--simular", action="store_true", help="sem câmera: envia mãos sintéticas em todas as poses")
+    ap.add_argument("--coletar", nargs="?", const="auto", help="coleta guiada das poses + calibração pessoal")
+    ap.add_argument("--tudo", action="store_true", help="com --coletar: refaz todas as poses (não só as pendentes)")
+    ap.add_argument("--calibrar", help="calibra o perfil pessoal a partir de uma coleta (.jsonl) ou de uma pasta de coletas")
+    ap.add_argument("--avaliar", help="mede o reconhecimento numa coleta (.jsonl) ou numa pasta de coletas")
+    ap.add_argument("--perfil", help="perfil pessoal (padrão: perfil.json ao lado do modelo)")
     args = ap.parse_args()
 
     if args.autoteste:
         return self_test()
     if args.simular:
         return simulate()
+    if args.calibrar:
+        target = os.path.abspath(args.calibrar)
+        folder = target if os.path.isdir(target) else os.path.dirname(target)
+        sources = collection_files(target) if os.path.isdir(target) else [target]
+        return calibrate(sources, args.perfil or os.path.join(folder, "perfil.json"))
+    if args.avaliar:
+        target = os.path.abspath(args.avaliar)
+        folder = target if os.path.isdir(target) else os.path.dirname(target)
+        return evaluate_file(target, args.perfil or os.path.join(folder, "perfil.json"))
     if not args.modelo:
         ap.error("--modelo é obrigatório")
+    if args.coletar:
+        return collect(args)
+    profile = args.perfil or os.path.join(os.path.dirname(os.path.abspath(args.modelo)), "perfil.json")
+    has_profile = os.path.exists(profile) and load_profile(profile)
 
     try:
         import cv2
@@ -451,7 +1017,7 @@ def main():
         min_tracking_confidence=0.5,
     )
     landmarker = vision.HandLandmarker.create_from_options(options)
-    out("OK camera")
+    out("OK camera" + (" perfil" if has_profile else ""))
 
     tracker = Tracker()
     t0 = time.monotonic()
@@ -545,11 +1111,26 @@ def rot(p, ax, ay, az):
     return (x, y, z)
 
 
-def synth_hand(pose, rng, hard=False):
+Z_MULT = 2.5          # ruído de profundidade relativo (o MediaPipe erra mais no eixo da câmera)
+
+
+def make_identity(rng):
+    """Características fixas de uma pessoa/mão: lado, costas para a câmera, tamanho, proporções."""
+    return {"left": rng.random() < 0.5, "back": rng.random() < 0.15, "scale": rng.uniform(0.8, 1.25),
+            "segs": {f: rng.uniform(0.9, 1.1) for f in MCP}}
+
+
+def synth_hand(pose, rng, hard=False, real=False, identity=None, style=None):
     """hard=True: dedos menos definidos (esticados meio relaxados, dobrados menos fechados),
-    mais ruído e a mão mais inclinada, como numa webcam real com gente sem prática."""
+    mais ruído e a mão mais inclinada, como numa webcam real com gente sem prática.
+    real=True (além de hard): mão esquerda ou direita, às vezes as costas da mão para a
+    câmera, mãos de tamanhos e proporções diferentes e ruído de profundidade maior (o
+    MediaPipe erra mais no eixo da câmera).
+    style: jeito particular de uma pessoa (dedos que não esticam/fecham totalmente, polegar
+    pouco aberto, Spock tímido) — usado para testar a calibração pessoal."""
     fingers_ext, thumb_mode, splay_over = POSES[pose]
     noise_deg, pos_noise, tilt = (14, 0.0035, 1.5) if hard else (8, 0.002, 1.0)
+    ident = (identity or make_identity(rng)) if real else None
     pts = [None] * 21
     pts[0] = (0.0, 0.0, 0.0)
     for f, (mx, my) in MCP.items():
@@ -558,15 +1139,19 @@ def synth_hand(pose, rng, hard=False):
         if thumb_mode == "pinch" and f == "indicador":
             flex = (30, 35, 20)
         elif extended:
-            flex = (12, 12, 8) if hard else (5, 5, 3)
+            flex = (style or {}).get("ext") or ((12, 12, 8) if hard else (5, 5, 3))
         else:
-            flex = (65, 90, 55) if hard else (75, 100, 60)
+            flex = (style or {}).get("fold") or ((65, 90, 55) if hard else (75, 100, 60))
         flex = [a + rng.uniform(-noise_deg, noise_deg) for a in flex]
-        sp = math.radians((splay_over or SPLAY).get(f, SPLAY[f]) + rng.uniform(-3, 3))
+        splay = dict(splay_over or SPLAY)
+        if pose == "spock" and style and "spock" in style:
+            splay["anelar"], splay["mindinho"] = style["spock"]
+        sp = math.radians(splay.get(f, SPLAY[f]) + rng.uniform(-3, 3))
         p = (mx, my, 0.0)
         pts[mcp] = p
         phi = 0.0
-        for joint, length, bend in zip((pip, dip, tip), SEGS[f], flex):
+        seg_scale = ident["segs"][f] if real else 1.0
+        for joint, length, bend in zip((pip, dip, tip), [s * seg_scale for s in SEGS[f]], flex):
             phi += math.radians(bend)
             d = (math.sin(sp) * math.cos(phi), math.cos(sp) * math.cos(phi), math.sin(phi))
             p = (p[0] + d[0] * length, p[1] + d[1] * length, p[2] + d[2] * length)
@@ -575,7 +1160,7 @@ def synth_hand(pose, rng, hard=False):
     cmc = (0.024, 0.022, 0.004)
     pts[1] = cmc
     if thumb_mode in ("ext", "up", "down"):
-        a = math.radians(rng.uniform(52, 85) if hard else rng.uniform(60, 80))
+        a = math.radians(rng.uniform(*((style or {}).get("thumb") or ((52, 85) if hard else (60, 80)))))
         d = (math.sin(a), math.cos(a), 0.08)
         pts[2] = (cmc[0] + d[0] * 0.035, cmc[1] + d[1] * 0.035, cmc[2] + d[2] * 0.035)
         pts[3] = (pts[2][0] + d[0] * 0.030, pts[2][1] + d[1] * 0.030, pts[2][2] + d[2] * 0.030)
@@ -596,10 +1181,21 @@ def synth_hand(pose, rng, hard=False):
     elif thumb_mode == "down":
         roll += math.atan2(pts[4][0] - pts[2][0], pts[4][1] - pts[2][1]) + math.pi
     pitch, yaw = math.radians(rng.uniform(-25, 25) * tilt), math.radians(rng.uniform(-35, 35) * tilt)
+    z_noise = pos_noise
+    if real:
+        if ident["left"]:                            # mão esquerda = espelho da direita
+            pts = [(-p[0], p[1], p[2]) for p in pts]
+            roll = -roll
+        if ident["back"]:                            # costas da mão para a câmera
+            yaw += math.pi
+            roll = -roll                             # (o giro espelha x; mantém o polegar no lugar)
+        s = ident["scale"]
+        pts = [(p[0] * s, p[1] * s, p[2] * s) for p in pts]
+        z_noise = pos_noise * Z_MULT
     world = []
     for p in pts:
         q = rot(p, pitch, yaw, roll)
-        world.append((q[0] + rng.gauss(0, pos_noise), q[1] + rng.gauss(0, pos_noise), q[2] + rng.gauss(0, pos_noise)))
+        world.append((q[0] + rng.gauss(0, pos_noise), q[1] + rng.gauss(0, pos_noise), q[2] + rng.gauss(0, z_noise)))
     # Imagem: projeção simples, com y crescendo para baixo
     img = [(0.5 + q[0] * 3, 0.5 - q[1] * 3) for q in world]
     # O MediaPipe dá y "do mundo" crescendo para baixo também
@@ -607,7 +1203,7 @@ def synth_hand(pose, rng, hard=False):
     return world, img
 
 
-def evaluate(classify_fn, hard, trials=200, seed=1, verbose=False):
+def evaluate(classify_fn, hard, trials=200, seed=1, verbose=False, real=False):
     """Acerto e 'disparo errado' (pose válida porém trocada) por quadro isolado."""
     rng = random.Random(seed)
     total = ok = wrong = 0
@@ -615,7 +1211,7 @@ def evaluate(classify_fn, hard, trials=200, seed=1, verbose=False):
     for pose in POSES:
         hits = 0
         for _ in range(trials):
-            world, img = synth_hand(pose, rng, hard)
+            world, img = synth_hand(pose, rng, hard, real)
             got = classify_fn(world, img, HandState())
             got = got[0] if isinstance(got, tuple) else got
             if got == pose:
@@ -631,15 +1227,20 @@ def evaluate(classify_fn, hard, trials=200, seed=1, verbose=False):
     return 100.0 * ok / total, 100.0 * wrong / total, confusion
 
 
-def stability(classify_fn, vote_fn, hard, frames=40, seed=2):
-    """Simula a mão parada numa pose por 'frames' quadros (cada quadro com ruído próprio) e
-    mede: % de quadros com a pose estável certa e quantas vezes a pose estável trocou."""
+def stability(classify_fn, vote_fn, hard, frames=40, seed=2, real=False, smooth=False):
+    """Simula a mão parada numa pose por 'frames' quadros (cada quadro com ruído próprio; no
+    modo realista a mesma pessoa/mão do começo ao fim) e mede: % de quadros com a pose
+    estável certa e quantas vezes a pose estável trocou. smooth=True reproduz o caminho do
+    app: pontos suavizados -> classificação -> fusão temporal."""
     rng = random.Random(seed)
     right = counted = switches = 0
     for pose in POSES:
         state, last = HandState(), None
+        ident = make_identity(rng) if real else None
         for k in range(frames):
-            world, img = synth_hand(pose, rng, hard)
+            world, img = synth_hand(pose, rng, hard, real, ident)
+            if smooth:
+                world = state.smooth_world(world)
             stable = vote_fn(state, classify_fn(world, img, state))
             if k >= 6:
                 counted += 1
@@ -650,17 +1251,31 @@ def stability(classify_fn, vote_fn, hard, frames=40, seed=2):
     return 100.0 * right / counted, switches
 
 
-def self_test():
-    for hard in (False, True):
-        print("=== mãos %s ===" % ("DIFÍCEIS (relaxadas, inclinadas, ruidosas)" if hard else "normais"))
-        acc, wrong, confusion = evaluate(classify, hard, verbose=True)
-        for (want, got), c in confusion.most_common(8):
-            print("    confusão: %s -> %s x%d" % (want, got, c))
-        steady, switches = stability(classify, lambda s, r: s.fuse(r[3])[0], hard)
-        print("  acerto por quadro: %.1f%%   disparo errado: %.1f%%" % (acc, wrong))
-        print("  com fusão temporal: pose certa em %.1f%% dos quadros, %d trocas indevidas" % (steady, switches))
-    acc, _, _ = evaluate(classify, False)
-    return 0 if acc >= 90 else 2
+MODES = (
+    ("normais", False, False),
+    ("difíceis (relaxadas, inclinadas, ruidosas)", True, False),
+    ("realistas (+ esquerda/direita, costas, tamanhos, ruído de profundidade)", True, True),
+)
+# Metas por modo: pose estável certa (%), trocas indevidas, disparo errado por quadro (%)
+TARGETS = {False: (99.5, 0, 1.0), True: (99.0, 3, 3.0)}
+
+
+def self_test(verbose=True):
+    passed = True
+    for label, hard, real in MODES:
+        print("=== mãos %s ===" % label)
+        acc, wrong, confusion = evaluate(classify, hard, verbose=verbose and not real, real=real)
+        if verbose:
+            for (want, got), c in confusion.most_common(6):
+                print("    confusão: %s -> %s x%d" % (want, got, c))
+        steady, switches = stability(classify, lambda s, r: s.fuse(r[3])[0], hard, real=real, smooth=True)
+        want_steady, want_switches, want_wrong = TARGETS[hard]
+        ok = steady >= want_steady and switches <= want_switches and wrong <= want_wrong
+        passed &= ok
+        print("  quadro isolado: acerto %.1f%%, disparo errado %.1f%% (meta <= %.1f%%)" % (acc, wrong, want_wrong))
+        print("  como no app (suavização + fusão): pose certa %.1f%% (meta >= %.1f%%), %d trocas indevidas (meta <= %d)  %s"
+              % (steady, want_steady, switches, want_switches, "OK" if ok else "ABAIXO DA META"))
+    return 0 if passed else 2
 
 
 if __name__ == "__main__":

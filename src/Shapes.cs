@@ -78,7 +78,7 @@ namespace Particulas
                 new Shape("Flor",        "letra W",            "mindinho",           0.10, 0,    false, null,       Flower),
                 new Shape("Raio",        "letra Z",            "rock",               0.05, 0,    true,  null,       Lightning),
                 new Shape("Rosquinha",   "círculo duplo",      "2 punhos",           0.70, 0.5,  false, null,       Torus),
-                new Shape("Átomo",       "8 em pé",            "Spock",              0.25, 0.3,  false, OrbitAtom,  Atom),
+                new Shape("Átomo",       "8 em pé",            "Spock / 2 mãos em L", 0.25, 0.3,  false, OrbitAtom,  Atom),
                 new Shape("Terra",       "arco ∩",             "2 mãos em V",        0.35, 0.35, false, OrbitMoon,  Earth),
                 new Shape("Diamante",    "losango",            "L",                  0.35, 0.6,  false, null,       Diamond),
                 new Shape("Árvore",      "chapéu ^",           "—",                  0.20, 0.45, false, null,       Tree),

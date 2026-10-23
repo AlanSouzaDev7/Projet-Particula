@@ -80,7 +80,7 @@ namespace Particulas
             { "indicador", Shapes.Star_ }, { "hangloose", Shapes.Galaxy_ }, { "v", Shapes.Dna_ },
             { "quatro", Shapes.Cube_ }, { "tres", Shapes.Pyramid_ }, { "dois-indicadores", Shapes.Infinity_ },
             { "joinha", Shapes.Smiley_ }, { "mindinho", Shapes.Flower_ }, { "rock", Shapes.Lightning_ },
-            { "dois-punhos", Shapes.Torus_ }, { "spock", Shapes.Atom_ }, { "dois-v", Shapes.Earth_ },
+            { "dois-punhos", Shapes.Torus_ }, { "spock", Shapes.Atom_ }, { "dois-L", Shapes.Atom_ }, { "dois-v", Shapes.Earth_ },
             { "L", Shapes.Diamond_ }, { "negativo", Shapes.Tornado_ }, { "pistola", Shapes.Waves_ },
         };
 
@@ -114,6 +114,7 @@ namespace Particulas
                 case "punho": return "Punho";
                 case "dois-punhos": return "2 punhos";
                 case "dois-v": return "2 mãos em V";
+                case "dois-L": return "2 mãos em L";
                 case "aberta": return "Mão aberta";
                 case "duas-abertas": return "2 mãos abertas";
                 case "": return "";
