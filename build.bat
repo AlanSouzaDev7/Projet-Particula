@@ -7,6 +7,6 @@ if not exist "%CSC%" (
   echo Nao encontrei o csc.exe do .NET Framework 4.
   exit /b 1
 )
-"%CSC%" /nologo /optimize+ /target:exe /platform:x64 /codepage:65001 /out:"%~dp0Particulas.exe" "%~dp0src\*.cs"
+"%CSC%" /nologo /optimize+ /target:exe /platform:x64 /codepage:65001 /r:System.Drawing.dll /out:"%~dp0Particulas.exe" "%~dp0src\*.cs"
 if errorlevel 1 exit /b 1
 echo Pronto: %~dp0Particulas.exe

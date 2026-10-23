@@ -7,7 +7,8 @@ namespace Particulas
     // Projeta as partículas em células de texto (Braille 2x4 ou pontos), com:
     //  - iluminação por normal (difusa + especular) e neblina de profundidade;
     //  - oclusão por célula (o que está atrás de uma superfície quase não aparece);
-    //  - campo de estrelas ao fundo com paralaxe;
+    //  - pontilhado por sombreamento (áreas iluminadas com mais pontos, sombras com menos);
+    //  - céu de fundo: Via Láctea com nebulosa, galáxia distante e estrelas coloridas;
     //  - saída diferencial: só as células que mudaram desde o último quadro vão para o terminal.
     sealed class Renderer
     {
@@ -23,6 +24,8 @@ namespace Particulas
         int[] cnt, bits;
         float[] ar, ag, ab, wsum, zmin;
         byte[] star;
+        int[] starColor, nebula;
+        byte[] near;
 
         // Rascunho por partícula (evita projetar duas vezes)
         int[] pCell, pBit;
@@ -31,9 +34,16 @@ namespace Particulas
         byte[] buf = new byte[1 << 16];
         int len;
 
-        const int StarCount = 260;
-        readonly double[] stX = new double[StarCount], stY = new double[StarCount],
-                          stZ = new double[StarCount], stPh = new double[StarCount];
+        // ---- céu de fundo: estrelas num "panorama" (azimute x elevação) ----
+        // A Via Láctea é uma faixa senoidal que dá a volta no céu; a câmera vê ~1,6 rad dela.
+        // O céu só se move quando a mão gira o objeto (paralaxe) e numa deriva bem lenta:
+        // estrelas paradas não precisam ser reenviadas ao terminal a cada quadro.
+        const double SkyFov = 1.6;
+        const double AndromedaPhi = 2.4, AndromedaE = 0.52;
+        readonly int starCount;
+        readonly double[] stPhi, stE, stB, stPh;
+        readonly int[] stCol;
+        readonly bool[] stTwinkle;
 
         // Luz vinda de cima/esquerda/frente, em espaço de câmera (z negativo = em direção ao observador)
         static readonly double Lx, Ly, Lz, Hx, Hy, Hz;
@@ -49,13 +59,67 @@ namespace Particulas
         public Renderer()
         {
             var rnd = new FastRandom(7);
-            for (int i = 0; i < StarCount; i++)
+            const int band = 2600, field = 700, andromeda = 260;
+            starCount = band + field + andromeda;
+            stPhi = new double[starCount]; stE = new double[starCount]; stB = new double[starCount];
+            stPh = new double[starCount]; stCol = new int[starCount]; stTwinkle = new bool[starCount];
+            for (int i = 0; i < starCount; i++)
             {
-                stX[i] = (rnd.NextDouble() * 2 - 1) * 9;
-                stY[i] = (rnd.NextDouble() * 2 - 1) * 5;
-                stZ[i] = (rnd.NextDouble() * 2 - 1) * 9;
+                double phi, e, b;
+                if (i < band)
+                {
+                    phi = rnd.NextDouble() * 2 * Math.PI;
+                    e = BandCenter(phi) + rnd.Gauss() * (rnd.NextDouble() < 0.7 ? 0.07 : 0.17);
+                    b = 0.3 + 0.7 * Math.Pow(rnd.NextDouble(), 3);        // muitas fracas, poucas fortes
+                }
+                else if (i < band + field)
+                {
+                    phi = rnd.NextDouble() * 2 * Math.PI;
+                    e = rnd.NextDouble() * 1.9 - 0.95;
+                    b = 0.35 + 0.65 * Math.Pow(rnd.NextDouble(), 2);
+                }
+                else
+                {
+                    // Galáxia distante (tipo Andrômeda): elipse inclinada com núcleo denso
+                    double u = rnd.Gauss() * 0.06, v = rnd.Gauss() * 0.018;
+                    phi = AndromedaPhi + u * 0.87 - v * 0.5;
+                    e = AndromedaE + u * 0.5 * 0.55 + v * 0.87;
+                    b = 0.35 + 0.5 * Math.Exp(-(u * u) / 0.002);
+                }
+                stPhi[i] = phi; stE[i] = e; stB[i] = b;
                 stPh[i] = rnd.NextDouble();
+                stTwinkle[i] = rnd.NextDouble() < 0.3;
+                double t = rnd.NextDouble();                               // temperatura da estrela
+                stCol[i] = t < 0.55 ? 0xC8D7FF : (t < 0.8 ? 0xFFF0D8 : (t < 0.92 ? 0xFFCF9A : 0x9FBFFF));
             }
+        }
+
+        static double BandCenter(double phi)
+        {
+            return 0.32 * Math.Sin(phi + 0.9) + 0.05 * Math.Sin(3 * phi);
+        }
+
+        static double WrapPi(double a)
+        {
+            a %= 2 * Math.PI;
+            if (a > Math.PI) a -= 2 * Math.PI;
+            if (a < -Math.PI) a += 2 * Math.PI;
+            return a;
+        }
+
+        // Brilho da nebulosa (cor de fundo das células) num ponto do céu. Fica larga, suave e
+        // escura de propósito: o fundo de cada célula é um retângulo, e variações fortes ou
+        // detalhes finos apareceriam como blocos. Quem desenha a Via Láctea são as estrelas.
+        static int NebulaColor(double phi, double e)
+        {
+            double d = (e - BandCenter(phi)) / 0.22;
+            double tex = 0.8 + 0.12 * Math.Sin(phi * 3 + Math.Sin(e * 4)) + 0.08 * Math.Sin(phi * 7 - e * 5);
+            double band = Math.Exp(-d * d) * tex;
+            double core = Math.Exp(-d * d * 2.5) * (0.5 + 0.5 * Math.Sin(phi * 2 + 1));
+            double r = 16 * band + 9 * core, g = 10 * band + 6 * core, b = 26 * band + 4 * core;
+            if (r + g + b < 9) return -1;
+            // Quantizado em degraus de 3: a nebulosa muda devagar e não gera tráfego à toa
+            return ((int)r / 3 * 3 << 16) | ((int)g / 3 * 3 << 8) | ((int)b / 3 * 3);
         }
 
         public void Resize(int w, int h)
@@ -64,7 +128,7 @@ namespace Particulas
             int n = W * H;
             Glyph = new char[n]; Fg = new int[n]; Bg = new int[n];
             prevGlyph = new char[n]; prevFg = new int[n]; prevBg = new int[n];
-            cnt = new int[n]; bits = new int[n]; star = new byte[n];
+            cnt = new int[n]; bits = new int[n]; star = new byte[n]; starColor = new int[n]; nebula = new int[n]; near = new byte[n];
             ar = new float[n]; ag = new float[n]; ab = new float[n]; wsum = new float[n]; zmin = new float[n];
             full = true;
         }
@@ -92,7 +156,7 @@ namespace Particulas
             pZ = new float[n]; pR = new float[n]; pG = new float[n]; pB = new float[n];
         }
 
-        public void Rasterize(Sim sim, bool braille, int rows, double yaw, double tilt, double zoom, double time)
+        public void Rasterize(Sim sim, bool braille, int rows, double yaw, double tilt, double zoom, double time, double sky)
         {
             Array.Clear(cnt, 0, cnt.Length); Array.Clear(bits, 0, bits.Length); Array.Clear(star, 0, star.Length);
             Array.Clear(ar, 0, ar.Length); Array.Clear(ag, 0, ag.Length); Array.Clear(ab, 0, ab.Length);
@@ -128,15 +192,18 @@ namespace Particulas
                 double nx1 = nx * cyw + nz * syw, nz1 = -nx * syw + nz * cyw;
                 double ny2 = ny * ct + nz1 * st, nz2 = -ny * st + nz1 * ct;
                 double diff = nx1 * Lx + ny2 * Ly + nz2 * Lz;
-                if (diff < 0) diff = -diff * 0.25;                          // luz de preenchimento por trás
+                if (diff < 0) diff = -diff * 0.3;                           // luz de preenchimento por trás
                 double sp = nx1 * Hx + ny2 * Hy + nz2 * Hz;
                 sp = sp > 0 ? sp * sp : 0; sp *= sp; sp *= sp; sp *= sp;     // ^16
+                // Luz de contorno: superfícies "de lado" para a câmera acendem a silhueta
+                double facing = nz2 < 0 ? -nz2 : nz2, rim = 1 - facing;
+                rim = rim * rim * rim;
                 double depth = (z2 + 0.6) / 1.8;
-                double fog = 1 - 0.4 * (depth < 0 ? 0 : (depth > 1 ? 1 : depth));
-                double shade = (0.32 + 0.68 * diff) * fog, spec = 190 * sp * fog;
-                pR[i] = (float)(sim.R[i] * shade + spec);
-                pG[i] = (float)(sim.G[i] * shade + spec);
-                pB[i] = (float)(sim.B[i] * shade + spec);
+                double fog = 1 - 0.3 * (depth < 0 ? 0 : (depth > 1 ? 1 : depth));
+                double shade = (0.44 + 0.56 * diff + 0.5 * rim) * fog, spec = 190 * sp * fog, glow = 45 * rim * fog;
+                pR[i] = (float)(sim.R[i] * shade + spec + glow);
+                pG[i] = (float)(sim.G[i] * shade + spec + glow);
+                pB[i] = (float)(sim.B[i] * shade + spec + glow);
             }
 
             // Passo 2: acumula cor ponderada pela proximidade; o que está bem atrás não acende pontos
@@ -152,21 +219,106 @@ namespace Particulas
                 if (dz < 0.35f) { cnt[cell]++; bits[cell] |= pBit[i]; }
             }
 
-            // Estrelas ao fundo: giram devagar com a câmera (paralaxe) e cintilam
-            double cs = Math.Cos(yaw * 0.25), ss = Math.Sin(yaw * 0.25), starSize = PixelsPerUnit(braille, rows, 1.0);
-            for (int i = 0; i < StarCount; i++)
+            // "Respiro" em volta da figura: distância (em anéis) de cada célula até a figura.
+            // 0 = figura, 1 = colada, 2 = perto, 3 = transição, 4 = longe. O céu se apaga aos
+            // poucos ao chegar perto, para a silhueta ficar limpa sem um "corte" no fundo.
+            for (int c = 0; c < near.Length; c++) near[c] = 4;
+            for (int y = 0; y < rows; y++)
+                for (int x = 0; x < W; x++)
+                {
+                    if (cnt[y * W + x] == 0) continue;
+                    for (int dy = -3; dy <= 3; dy++)
+                    {
+                        int yy = y + dy;
+                        if (yy < 0 || yy >= rows) continue;
+                        for (int dx = -7; dx <= 7; dx++)
+                        {
+                            int xx = x + dx;
+                            if (xx < 0 || xx >= W) continue;
+                            // células têm ~1:2 (largura:altura): 2 colunas valem 1 linha
+                            double d = Math.Sqrt(dx * dx * 0.25 + dy * dy);
+                            byte lv = d == 0 ? (byte)0 : (d <= 1.2 ? (byte)1 : (d <= 2.3 ? (byte)2 : (d <= 3.5 ? (byte)3 : (byte)4)));
+                            int cc = yy * W + xx;
+                            if (lv < near[cc]) near[cc] = lv;
+                        }
+                    }
+                }
+
+            // Vãos internos de figuras abertas (entre órbitas, entre braços da galáxia): figura
+            // dos dois lados na mesma linha, perto. Ali o céu fica a meia-luz, como "perto".
+            const int span = 10;
+            for (int y = 0; y < rows; y++)
             {
-                double x1 = stX[i] * cs + stZ[i] * ss, z1 = -stX[i] * ss + stZ[i] * cs + 12;
-                double p = cam / z1 * 3.5;
-                double px = pw * 0.5 + x1 * starSize * p, py = ph * 0.5 - stY[i] * starSize * p / a;
-                if (px < 0 || py < 0 || px >= pw || py >= ph) continue;
-                int ix = (int)px, iy = (int)py, cell = (iy / sy) * W + ix / sx;
-                if (cnt[cell] > 0) continue;
-                // Cintilar em 3 níveis: muda poucas vezes por segundo (menos células a reenviar)
-                double tw = 0.5 + 0.5 * Math.Sin(time * (0.8 + stPh[i] * 2.5) + stPh[i] * 40);
-                byte b = (byte)(45 + 40 * Math.Round(tw * 2));
-                if (b > star[cell]) star[cell] = b;
+                int row = y * W, lastLeft = -1000;
+                for (int x = 0; x < W; x++)
+                {
+                    if (cnt[row + x] > 0) { lastLeft = x; continue; }
+                    if (x - lastLeft > span || near[row + x] <= 2) continue;
+                    for (int d = 1; d <= span && x + d < W; d++)
+                        if (cnt[row + x + d] > 0) { near[row + x] = 2; break; }
+                }
+            }
+
+            // Céu: a câmera aponta para o azimute "sky" e vê SkyFov radianos para os lados
+            const double eScale = 0.55;                                    // elevação ±1 cobre a tela
+            for (int i = 0; i < starCount; i++)
+            {
+                double u = WrapPi(stPhi[i] - sky) / SkyFov + 0.5;
+                if (u < 0 || u >= 1) continue;
+                double v = 0.5 - stE[i] * eScale;
+                if (v < 0 || v >= 1) continue;
+                int ix = (int)(u * pw), iy = (int)(v * ph);
+                int cell = (iy / sy) * W + ix / sx;
+                if (near[cell] <= 1) continue;                             // nada de estrela colada na figura
+                double b = stB[i];
+                if (near[cell] == 2) b *= 0.4; else if (near[cell] == 3) b *= 0.7;
+                // Só parte das estrelas cintila, em poucos níveis (nitidez e pouco tráfego)
+                if (stTwinkle[i]) b *= 0.8 + 0.2 * Math.Round(1 + Math.Sin(time * (0.7 + stPh[i] * 2) + stPh[i] * 40));
+                byte lv = (byte)Math.Min(255, 255 * b);
+                if (lv > star[cell]) { star[cell] = lv; starColor[cell] = stCol[i]; }
                 if (braille) bits[cell] |= BrailleBit(ix % 2, iy % 4);
+            }
+
+            // Nebulosa: cor de fundo de cada célula (inclusive atrás das figuras), lida de um
+            // panorama pré-calculado do céu — o quadro só desloca o índice de azimute
+            if (skyRows != rows) BuildSkyTable(rows, eScale);
+            double cellsToSteps = SkySteps / (2 * Math.PI);
+            for (int x = 0; x < W; x++)
+            {
+                double phi = sky + ((x + 0.5) / W - 0.5) * SkyFov;
+                int col = (int)(phi * cellsToSteps) % SkySteps;
+                if (col < 0) col += SkySteps;
+                int src = col * skyRows;
+                for (int y = 0; y < rows; y++)
+                {
+                    int c = y * W + x, nb = skyTable[src + y], lv = near[c];
+                    // Atrás da figura e colado nela: preto; perto: nebulosa a meia força
+                    if (nb < 0 || lv <= 1) nb = -1;
+                    else if (lv <= 3)
+                    {
+                        int k = lv == 2 ? 3 : 7;                            // 30% e 70% da força
+                        nb = ((nb >> 16 & 255) * k / 10 << 16) | ((nb >> 8 & 255) * k / 10 << 8) | ((nb & 255) * k / 10);
+                        if (nb == 0) nb = -1;
+                    }
+                    nebula[c] = nb;
+                }
+                for (int y = rows; y < H; y++) nebula[y * W + x] = -1;
+            }
+        }
+
+        const int SkySteps = 1536;
+        int[] skyTable;
+        int skyRows = -1;
+
+        void BuildSkyTable(int rows, double eScale)
+        {
+            skyRows = rows;
+            skyTable = new int[SkySteps * rows];
+            for (int col = 0; col < SkySteps; col++)
+            {
+                double phi = col * 2 * Math.PI / SkySteps;
+                for (int y = 0; y < rows; y++)
+                    skyTable[col * rows + y] = NebulaColor(phi, (0.5 - (y + 0.5) / rows) / eScale);
             }
         }
 
@@ -176,27 +328,125 @@ namespace Particulas
             return 1 << (dy + dx * 3);
         }
 
+        // Ordem em que os 8 pontos de uma célula Braille são mantidos ao "ralear" (espalhados
+        // como numa matriz de Bayer, para o pontilhado ficar uniforme e não em listras)
+        static readonly int[] DitherOrder = { 0x01, 0x20, 0x08, 0x04, 0x02, 0x80, 0x10, 0x40 };
+
+        static int PopCount(int v)
+        {
+            v -= (v >> 1) & 0x55;
+            v = (v & 0x33) + ((v >> 2) & 0x33);
+            return (v + (v >> 4)) & 0x0F;
+        }
+
         public void Compose(bool braille, double gain)
         {
             for (int c = 0; c < cnt.Length; c++)
             {
-                Bg[c] = -1;
+                Bg[c] = nebula[c];
                 int n = cnt[c];
                 if (n == 0)
                 {
                     int s = star[c];
                     if (s > 0)
                     {
-                        Glyph[c] = braille ? (char)(0x2800 + bits[c]) : '·';
-                        Fg[c] = Rgb(s * 0.8, s * 0.85, s);
+                        int sc = starColor[c];
+                        double k = s / 255.0;
+                        Glyph[c] = braille ? (char)(0x2800 + bits[c]) : (s > 170 ? '•' : '·');
+                        Fg[c] = Rgb(((sc >> 16) & 255) * k, ((sc >> 8) & 255) * k, (sc & 255) * k);
                     }
                     else { Glyph[c] = ' '; Fg[c] = 0; }
                     continue;
                 }
-                double boost = Math.Min(1.3, 0.85 + 0.12 * n) * gain / wsum[c];
-                Fg[c] = Rgb(ar[c] * boost, ag[c] * boost, ab[c] * boost);
-                Glyph[c] = braille ? (char)(0x2800 + bits[c]) : (n == 1 ? '·' : (n <= 3 ? '•' : '●'));
+                double boost = Math.Min(1.3, 0.85 + 0.06 * n) * gain / wsum[c];
+                double r = ar[c] * boost, g = ag[c] * boost, b = ab[c] * boost;
+                double lum = Math.Min(1.0, (0.3 * r + 0.59 * g + 0.11 * b) / 255.0);
+                if (braille)
+                {
+                    // Pontilhado por sombreamento: quantos pontos ficam acesos segue a luz da célula
+                    int bt = bits[c], have = PopCount(bt);
+                    int target = Math.Max(2, Math.Min(8, (int)Math.Ceiling(8 * (0.22 + 0.78 * lum))));
+                    if (have > target)
+                    {
+                        int kept = 0, start = ((c % W) * 3 + (c / W) * 5) & 7;
+                        for (int j = 0; j < 8 && PopCount(kept) < target; j++)
+                        {
+                            int bit = DitherOrder[(start + j) & 7];
+                            if ((bt & bit) != 0) kept |= bit;
+                        }
+                        bt = kept;
+                    }
+                    Glyph[c] = (char)(0x2800 + bt);
+                }
+                else Glyph[c] = n == 1 || lum < 0.3 ? '·' : (lum < 0.62 ? '•' : '●');
+                Fg[c] = Rgb(r, g, b);
             }
+        }
+
+        // ---- diagnóstico: o fundo atrapalha a figura? ---------------------------------
+        public struct BackgroundStats
+        {
+            public int ObjectCells, LowContrast, DimCells, HaloStars, InnerStars;
+            public double NebulaBehind;
+        }
+
+        static double LinearLum(int rgb)
+        {
+            if (rgb < 0) return 0;
+            double r = ((rgb >> 16) & 255) / 255.0, g = ((rgb >> 8) & 255) / 255.0, b = (rgb & 255) / 255.0;
+            r = r <= 0.04045 ? r / 12.92 : Math.Pow((r + 0.055) / 1.055, 2.4);
+            g = g <= 0.04045 ? g / 12.92 : Math.Pow((g + 0.055) / 1.055, 2.4);
+            b = b <= 0.04045 ? b / 12.92 : Math.Pow((b + 0.055) / 1.055, 2.4);
+            return 0.2126 * r + 0.7152 * g + 0.0722 * b;
+        }
+
+        // Mede, no quadro já composto: contraste dos pontos da figura contra a cor de fundo
+        // (WCAG < 3:1 = ruim), estrelas encostadas no contorno, estrelas nos vãos internos da
+        // figura e o brilho médio da nebulosa atrás dela.
+        public BackgroundStats MeasureBackground(int rows)
+        {
+            var s = new BackgroundStats();
+            double nebSum = 0;
+            for (int y = 0; y < rows; y++)
+                for (int x = 0; x < W; x++)
+                {
+                    int c = y * W + x;
+                    if (cnt[c] > 0)
+                    {
+                        s.ObjectCells++;
+                        double lf = LinearLum(Fg[c]), lb = LinearLum(Bg[c]);
+                        // Ponto escuro sobre fundo preto é sombra de propósito; só conta como
+                        // interferência quando há cor de fundo (nebulosa) atrás do ponto.
+                        if ((lf + 0.05) / (lb + 0.05) < 3.0)
+                        {
+                            s.DimCells++;
+                            if (Bg[c] >= 0) s.LowContrast++;
+                        }
+                        nebSum += Bg[c] < 0 ? 0 : (((Bg[c] >> 16) & 255) + ((Bg[c] >> 8) & 255) + (Bg[c] & 255)) / 3.0;
+                        continue;
+                    }
+                    if (star[c] == 0 || Glyph[c] == ' ') continue;
+                    // Colada = a até ~1 linha da figura (mesma medida do "respiro": 2 colunas = 1 linha)
+                    bool touching = false;
+                    for (int dy = -1; dy <= 1 && !touching; dy++)
+                        for (int dx = -2; dx <= 2; dx++)
+                        {
+                            int xx = x + dx, yy = y + dy;
+                            if (dx * dx * 0.25 + dy * dy > 1.44) continue;
+                            if (xx >= 0 && xx < W && yy >= 0 && yy < rows && cnt[yy * W + xx] > 0) { touching = true; break; }
+                        }
+                    if (touching) { s.HaloStars++; continue; }
+                    // Vão interno: há figura à esquerda e à direita na mesma linha, perto
+                    bool left = false, right = false;
+                    for (int d = 1; d <= 8; d++)
+                    {
+                        if (x - d >= 0 && cnt[c - d] > 0) left = true;
+                        if (x + d < W && cnt[c + d] > 0) right = true;
+                    }
+                    if (left && right && star[c] > 110) s.InnerStars++;      // só estrelas bem visíveis
+                }
+            s.NebulaBehind = s.ObjectCells > 0 ? nebSum / s.ObjectCells : 0;
+            return s;
         }
 
         public static int Rgb(double r, double g, double b)
@@ -244,19 +494,20 @@ namespace Particulas
                     int fg = visible ? Fg[c] : -1;
                     int bg = Bg[c];
                     // Célula igual à que já está na tela (com cor imperceptivelmente diferente): pula
-                    if (!full && g == prevGlyph[c] && bg == prevBg[c] &&
+                    if (!full && g == prevGlyph[c] && SameBg(bg, prevBg[c]) &&
                         (fg < 0 ? prevFg[c] < 0 : prevFg[c] >= 0 && Close(fg, prevFg[c], SkipTolerance))) continue;
 
                     if (y != lastY || x != lastX + 1)
                     {
                         Csi(); Num(y + 1); Byte((byte)';'); Num(x + 1); Byte((byte)'H');
                     }
-                    if (bg != curBg)
+                    if (!SameBg(bg, curBg))
                     {
                         if (bg < 0) { Csi(); Byte((byte)'4'); Byte((byte)'9'); Byte((byte)'m'); }
                         else Color(48, bg);
                         curBg = bg;
                     }
+                    bg = curBg;
                     // Vizinhas com cor quase igual reaproveitam a cor atual (menos sequências de cor)
                     if (visible && (curFg < 0 || !Close(fg, curFg, ReuseTolerance))) { Color(38, fg); curFg = fg; }
                     Char(g);
@@ -274,7 +525,14 @@ namespace Particulas
             full = false;
         }
 
-        const int SkipTolerance = 28, ReuseTolerance = 20;
+        const int SkipTolerance = 28, ReuseTolerance = 20, BgTolerance = 10;
+
+        // Fundos "iguais": ambos sem cor, ou ambos com cor e quase idênticos (nebulosa suave)
+        static bool SameBg(int a, int b)
+        {
+            if (a < 0 || b < 0) return a == b;
+            return Close(a, b, BgTolerance);
+        }
 
         static bool Close(int a, int b, int tol)
         {

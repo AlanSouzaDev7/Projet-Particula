@@ -1,4 +1,4 @@
-using System;
+﻿using System;
 using System.Collections.Generic;
 using System.Diagnostics;
 using System.IO;
@@ -12,7 +12,8 @@ namespace Particulas
     {
         const string ESC = "\u001b";
         const double Dt = 1.0 / 40.0;
-        public const int ParticleCount = 3200;
+        public const int ParticleCount = 9600;
+        const double ShapeLockSeconds = 6.0;            // tempo mínimo entre uma troca de forma e outra
 
         readonly Shape[] shapes = Shapes.All();
         readonly Sim sim = new Sim(ParticleCount);
@@ -29,6 +30,8 @@ namespace Particulas
 
         // ---- câmera 3D ----
         double yaw, tilt = 0.15, tiltOffset, zoom = 1.0;
+        double skyYaw, skyYawRef;                       // azimute do céu de fundo (paralaxe)
+        const double SkyParallax = 0.3, SkyDrift = 0.004;
 
         // ---- desempenho ----
         int fpsFrames; double fpsClock, fps;
@@ -63,6 +66,7 @@ namespace Particulas
         readonly List<P> airStroke = new List<P>();
 
         double lastFistTime = -10;
+        double lastChange = -100;                       // quando a forma mudou pela última vez
 
         static readonly Dictionary<string, int> PoseToShape = new Dictionary<string, int>
         {
@@ -283,6 +287,14 @@ namespace Particulas
             fading = new List<P>(cells); fadeUntil = time + 0.7; fadeColor = color;
             P end = cells[cells.Count - 1];
 
+            bool changesShape = res.Action != Recognizer.ActClick && res.Action != Recognizer.ActNone &&
+                                !(res.Action >= 0 && res.Action == current);
+            if (changesShape && LockRemaining > 0)
+            {
+                Toast("Aguarde " + LockRemaining.ToString("0.0") + " s para trocar de forma", 0xFFB070);
+                return;
+            }
+
             switch (res.Action)
             {
                 case Recognizer.ActClick: sim.Shock(end.X, end.Y, 14, 1.0); fading = null; break;
@@ -307,10 +319,17 @@ namespace Particulas
             return ((baseIdx + dir) % shapes.Length + shapes.Length) % shapes.Length;
         }
 
+        // Segundos que faltam para poder trocar de forma de novo (0 = liberado)
+        double LockRemaining
+        {
+            get { return Math.Max(0, ShapeLockSeconds - (time - lastChange)); }
+        }
+
         void Select(int idx, string how)
         {
             welcome = false;
             current = idx; lastShape = idx;
+            lastChange = time;
             sim.SetShape(shapes[idx], false);
             Toast(shapes[idx].Name + "   ‹" + how + "›", 0xFFFFFF);
         }
@@ -319,6 +338,7 @@ namespace Particulas
         {
             welcome = false;
             current = -1;
+            lastChange = time;
             sim.Scatter(false);
             Toast("Pontos espalhados", 0xB0C4FF);
         }
@@ -340,12 +360,17 @@ namespace Particulas
             double targetTilt = (s != null ? s.Tilt : 0.15) + tiltOffset;
             tilt += (targetTilt - tilt) * (grabbing ? 0.35 : 0.04);
 
+            // Céu de fundo: acompanha (com paralaxe) só o giro feito com a mão; fora isso, deriva lenta
+            if (grabbing) skyYaw += WrapAngle(yaw - skyYawRef) * SkyParallax;
+            skyYaw += SkyDrift * Dt;
+
             if (!grabbing)
             {
                 if (s == null) yaw += WrapAngle(0.25 * Math.Sin(time * 0.2) - yaw) * 0.03;
                 else if (s.Spin > 0) yaw += s.Spin * Dt;
                 else yaw += WrapAngle(0.55 * Math.Sin(time * 0.8) - yaw) * 0.05;
             }
+            skyYawRef = yaw;
 
             sim.Step(time, s);
         }
@@ -371,7 +396,9 @@ namespace Particulas
             // Segurar a pose por um instante confirma o gesto (evita disparos no meio de transições)
             if (pose == holdPose) holdTime += Dt;
             else { holdPose = pose; holdTime = 0; holdFired = false; }
-            if (!holdFired && holdTime >= HoldSeconds)
+            // Se a forma mudou há menos de 6 s, a pose fica "na fila": dispara quando a trava
+            // acabar, desde que continue sendo feita (o painel mostra a contagem regressiva)
+            if (!holdFired && holdTime >= HoldSeconds && !(WouldChange(pose) && LockRemaining > 0))
             {
                 int idx;
                 if (PoseToShape.TryGetValue(pose, out idx))
@@ -400,6 +427,14 @@ namespace Particulas
             UpdateAirDrawing();
             UpdateGrab();
             UpdateTwoHandZoom();
+        }
+
+        // A pose levaria a uma forma diferente da atual (ou espalharia os pontos)?
+        bool WouldChange(string pose)
+        {
+            int idx;
+            if (PoseToShape.TryGetValue(pose, out idx)) return idx != current;
+            return pose == "punho" && current >= 0;
         }
 
         // Pinça fechada = caneta encostada: o traço no ar vai para o mesmo reconhecedor do mouse
@@ -449,7 +484,10 @@ namespace Particulas
                 if (Math.Abs(dx) > 0.3)
                 {
                     yaw = anchorYaw;                                 // desfaz o giro causado pela passada
-                    Select(Neighbor(dx > 0 ? +1 : -1), dx > 0 ? "mão →" : "mão ←");
+                    if (LockRemaining > 0)
+                        Toast("Aguarde " + LockRemaining.ToString("0.0") + " s para trocar de forma", 0xFFB070);
+                    else
+                        Select(Neighbor(dx > 0 ? +1 : -1), dx > 0 ? "mão →" : "mão ←");
                     swipeCooldown = time + 1.0;
                     swipeTrail.Clear();
                     anchorX = mainX; anchorY = mainY; anchorYaw = yaw; anchorTilt = tiltOffset;
@@ -486,7 +524,7 @@ namespace Particulas
         void Draw()
         {
             int rows = Math.Max(1, rend.H - 1);
-            rend.Rasterize(sim, braille, rows, yaw, tilt, zoom, time);
+            rend.Rasterize(sim, braille, rows, yaw, tilt, zoom, time, skyYaw);
             double gain = 1.0;
             if (current >= 0 && shapes[current].Electric)
                 gain = 0.8 + 0.25 * Math.Abs(Math.Sin(time * 23) * Math.Sin(time * 7.3));
@@ -606,11 +644,25 @@ namespace Particulas
             if (label.Length > iw - 2) label = label.Substring(0, iw - 2);
             rend.Put(ix + 1, y0 + ph - 3, label, 0xFFFFFF, bg);
             bool actionable = PoseToShape.ContainsKey(holdPose) || holdPose == "punho";
-            if (actionable)
+            int barW = iw - 2;
+            if (actionable && !holdFired && WouldChange(holdPose) && LockRemaining > 0)
             {
-                int filled = holdFired ? iw - 2 : (int)((iw - 2) * Math.Min(1, holdTime / HoldSeconds));
-                rend.Put(ix + 1, y0 + ph - 2, new string('█', filled) + new string('░', iw - 2 - filled),
+                // Trava de troca: barra azul enchendo até liberar
+                string wait = "aguarde " + LockRemaining.ToString("0.0") + " s ";
+                int filled = (int)(barW * (1 - LockRemaining / ShapeLockSeconds));
+                rend.Put(ix + 1, y0 + ph - 2, new string('█', filled) + new string('░', barW - filled), 0x6FA8FF, bg);
+                rend.Put(ix + 1 + Math.Max(0, barW - wait.Length), y0 + ph - 3, wait, 0x9CC4FF, bg);
+            }
+            else if (actionable)
+            {
+                int filled = holdFired ? barW : (int)(barW * Math.Min(1, holdTime / HoldSeconds));
+                rend.Put(ix + 1, y0 + ph - 2, new string('█', filled) + new string('░', barW - filled),
                          holdFired ? 0x7CFFB2 : 0xFFD27A, bg);
+            }
+            else if (LockRemaining > 0)
+            {
+                string wait = "próxima troca em " + Math.Ceiling(LockRemaining) + " s";
+                rend.Put(ix + 1, y0 + ph - 2, wait.PadRight(barW), 0x7F8FB8, bg);
             }
         }
 
@@ -680,6 +732,9 @@ namespace Particulas
                 lines.Add("  Punho fechado ......... espalha os pontos");
                 lines.Add("  Punho → abrir rápido .. EXPLOSÃO");
                 lines.Add("");
+                lines.Add("  Depois de uma troca, a próxima só é liberada após 6 s");
+                lines.Add("  (segure a nova pose: ela entra assim que liberar)");
+                lines.Add("");
                 lines.Add("  Traços: linha → ← troca, ↓ espalha, ↑ reúne");
                 lines.Add("  Mouse: botão esquerdo desenha, direito = onda, roda = zoom");
                 lines.Add("");
@@ -732,7 +787,7 @@ namespace Particulas
             {
                 sim.SetShape(s, true);
                 sim.Snap(s, 1.0);
-                r.Rasterize(sim, true, 26, s.Spin > 0 ? 0.5 : 0.25, s.Tilt, 1.0, 1.0);
+                r.Rasterize(sim, true, 26, s.Spin > 0 ? 0.5 : 0.25, s.Tilt, 1.0, 1.0, 0.3);
                 r.Compose(true, 1.0);
                 Console.WriteLine("=== " + s.Name + " (mão: " + s.Hand + " | traço: " + s.Gesture + ") ===");
                 Console.Write(r.ToPlain(26));
@@ -762,7 +817,7 @@ namespace Particulas
                 {
                     t += Dt; yaw += 0.55 * Dt;
                     sim.Step(t, s);
-                    r.Rasterize(sim, f % 2 == 0, H - 1, yaw, s.Tilt, 1.0, t);   // alterna Braille/pontos
+                    r.Rasterize(sim, f % 2 == 0, H - 1, yaw, s.Tilt, 1.0, t, t * 0.3);   // alterna Braille/pontos; céu andando
                     r.Compose(f % 2 == 0, 1.0);
                     if (f % 7 == 0) r.Put(10, 5, "texto sobreposto " + f, 0xFFFFFF, 0x202030);
                     var ms = new MemoryStream();
@@ -815,6 +870,113 @@ namespace Particulas
             }
         }
 
+        // Exporta quadros reais para um PNG, desenhando cada célula como o terminal mostra
+        // (pontos Braille na cor de frente sobre a cor de fundo), para avaliar a aparência final.
+        public static void ExportPng(string path)
+        {
+            var shapes = Shapes.All();
+            var sim = new Sim(ParticleCount);
+            var r = new Renderer();
+            const int W = 120, rows = 36, cw = 8, ch = 16, cols = 2, gap = 10, caption = 18;
+            r.Resize(W, rows + 1);
+            int[] pick = { Shapes.Heart_, Shapes.Planet_, Shapes.Atom_, Shapes.Earth_, Shapes.Cube_, Shapes.Galaxy_ };
+            int panelW = W * cw, panelH = rows * ch + caption;
+            int lines = (pick.Length + cols - 1) / cols;
+            using (var bmp = new System.Drawing.Bitmap(cols * panelW + (cols + 1) * gap, lines * panelH + (lines + 1) * gap))
+            using (var gr = System.Drawing.Graphics.FromImage(bmp))
+            using (var font = new System.Drawing.Font("Segoe UI", 10f))
+            {
+                gr.Clear(System.Drawing.Color.FromArgb(24, 24, 28));
+                gr.SmoothingMode = System.Drawing.Drawing2D.SmoothingMode.AntiAlias;
+                for (int k = 0; k < pick.Length; k++)
+                {
+                    Shape s = shapes[pick[k]];
+                    sim.SetShape(s, false);
+                    double t = 0;
+                    for (int f = 0; f < 120; f++) { t += Dt; sim.Step(t, s); }
+                    r.Rasterize(sim, true, rows, s.Spin > 0 ? 0.6 : 0.25, s.Tilt, 1.0, t, 1.1 + pick[k] * 0.35);
+                    r.Compose(true, 1.0);
+                    int ox = gap + (k % cols) * (panelW + gap), oy = gap + (k / cols) * (panelH + gap);
+                    gr.DrawString(s.Name, font, System.Drawing.Brushes.Gainsboro, ox, oy);
+                    oy += caption;
+                    gr.FillRectangle(System.Drawing.Brushes.Black, ox, oy, panelW, rows * ch);
+                    for (int y = 0; y < rows; y++)
+                        for (int x = 0; x < W; x++)
+                        {
+                            int c = y * W + x, bg = r.Bg[c];
+                            if (bg >= 0)
+                                using (var b = new System.Drawing.SolidBrush(System.Drawing.Color.FromArgb(bg >> 16 & 255, bg >> 8 & 255, bg & 255)))
+                                    gr.FillRectangle(b, ox + x * cw, oy + y * ch, cw, ch);
+                            char g = r.Glyph[c];
+                            if (g < '⠀' || g > '⣿') continue;
+                            int bits = g - 0x2800, fg = r.Fg[c];
+                            if (bits == 0) continue;
+                            using (var b = new System.Drawing.SolidBrush(System.Drawing.Color.FromArgb(fg >> 16 & 255, fg >> 8 & 255, fg & 255)))
+                                for (int dy = 0; dy < 4; dy++)
+                                    for (int dx = 0; dx < 2; dx++)
+                                    {
+                                        int bit = dy == 3 ? (dx == 0 ? 0x40 : 0x80) : 1 << (dy + dx * 3);
+                                        if ((bits & bit) == 0) continue;
+                                        gr.FillEllipse(b, ox + x * cw + 1.2f + dx * 3.6f, oy + y * ch + 1.6f + dy * 3.6f, 2.6f, 2.6f);
+                                    }
+                        }
+                }
+                bmp.Save(path, System.Drawing.Imaging.ImageFormat.Png);
+            }
+            Console.WriteLine("prévia salva em " + path);
+        }
+
+        // Mede se o céu de fundo atrapalha a figura: contraste, estrelas no contorno e nos vãos.
+        // Cada forma é vista com o céu em várias posições (a Via Láctea e a Andrômeda passam atrás dela).
+        public static int VerifyBackground()
+        {
+            Console.OutputEncoding = new UTF8Encoding(false);
+            var shapes = Shapes.All();
+            var sim = new Sim(ParticleCount);
+            var r = new Renderer();
+            const int W = 160, H = 45, rows = H - 1, views = 48;
+            r.Resize(W, H);
+            long obj = 0, low = 0, dim = 0, halo = 0, inner = 0, frames = 0;
+            double worstLow = 0, nebMax = 0;
+            string worstShape = "";
+            Console.WriteLine("forma          contraste ruim pelo fundo  estrelas coladas/quadro  estrelas nos vãos/quadro  nebulosa atrás  (sombras)");
+            foreach (var s in shapes)
+            {
+                sim.SetShape(s, false);
+                double t = 0;
+                for (int k = 0; k < 90; k++) { t += Dt; sim.Step(t, s); }   // deixa a forma se montar
+                long o = 0, l = 0, dm = 0, h = 0, n = 0;
+                double neb = 0;
+                for (int v = 0; v < views; v++)
+                {
+                    t += Dt; sim.Step(t, s);
+                    double yaw = v * 0.37, sky = v * 2 * Math.PI / views;
+                    r.Rasterize(sim, true, rows, yaw, s.Tilt, 1.0, t, sky);
+                    r.Compose(true, 1.0);
+                    Renderer.BackgroundStats st = r.MeasureBackground(rows);
+                    o += st.ObjectCells; l += st.LowContrast; dm += st.DimCells; h += st.HaloStars; n += st.InnerStars;
+                    neb += st.NebulaBehind;
+                    nebMax = Math.Max(nebMax, st.NebulaBehind);
+                }
+                double pct = 100.0 * l / Math.Max(1, o);
+                if (pct > worstLow) { worstLow = pct; worstShape = s.Name; }
+                Console.WriteLine(s.Name.PadRight(15) + (pct.ToString("0.0") + "%").PadLeft(25) +
+                                  ((double)h / views).ToString("0.0").PadLeft(25) + ((double)n / views).ToString("0.0").PadLeft(26) +
+                                  (neb / views).ToString("0.0").PadLeft(16) + ((100.0 * dm / Math.Max(1, o)).ToString("0") + "%").PadLeft(11));
+                obj += o; low += l; dim += dm; halo += h; inner += n; frames += views;
+            }
+            double lowPct = 100.0 * low / Math.Max(1, obj);
+            Console.WriteLine();
+            Console.WriteLine("TOTAL: contraste ruim causado pelo fundo em " + lowPct.ToString("0.00") + "% das células da figura (pior: " +
+                              worstShape + " " + worstLow.ToString("0.0") + "%)");
+            Console.WriteLine("       estrelas coladas no contorno: " + ((double)halo / frames).ToString("0.0") +
+                              "/quadro   estrelas nos vãos: " + ((double)inner / frames).ToString("0.0") + "/quadro");
+            Console.WriteLine("       (sombras intencionais, pontos escuros sobre preto: " + (100.0 * dim / Math.Max(1, obj)).ToString("0") + "% — não é interferência)");
+            bool ok = lowPct < 1.0 && halo == 0 && (double)inner / frames < 2.0;
+            Console.WriteLine(ok ? "RESULTADO: o fundo não interfere na figura" : "RESULTADO: o fundo interfere na figura");
+            return ok ? 0 : 1;
+        }
+
         // Mede o custo por quadro (simulação + renderização) e o volume enviado ao terminal
         public static void Benchmark()
         {
@@ -837,7 +999,7 @@ namespace Particulas
                     t += Dt; yaw += 0.55 * Dt;
                     sw.Restart(); sim.Step(t, s); sw.Stop(); simMs += sw.Elapsed.TotalMilliseconds;
                     sw.Restart();
-                    r.Rasterize(sim, true, H - 1, yaw, s.Tilt, 1.0, t);
+                    r.Rasterize(sim, true, H - 1, yaw, s.Tilt, 1.0, t, t * SkyDrift);
                     r.Compose(true, 1.0);
                     r.Present(Stream.Null);
                     sw.Stop(); renMs += sw.Elapsed.TotalMilliseconds;

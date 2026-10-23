@@ -91,7 +91,8 @@ namespace Particulas
 
         public void Step(double time, Shape shape)
         {
-            const double damping = 0.87, noise = 0.0025, colorRate = 0.06;
+            // Tremor baixo: com muitas partículas, contornos nítidos valem mais que "vida" extra
+            const double damping = 0.87, noise = 0.0012, colorRate = 0.06;
             bool scattered = shape == null;
             Animator anim = shape != null ? shape.Anim : null;
             bool electric = shape != null && shape.Electric;

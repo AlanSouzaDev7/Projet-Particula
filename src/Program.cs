@@ -1,4 +1,4 @@
-// =====================================================================================
+﻿// =====================================================================================
 //  Partículas 3D — pontos que se transformam em objetos a partir de gestos da mão
 //  (câmera), traços desenhados no ar ou com o mouse.
 //
@@ -27,6 +27,12 @@ namespace Particulas
                 if (a == "--preview") { App.Preview(); return 0; }
                 if (a == "--benchmark") { App.Benchmark(); return 0; }
                 if (a == "--verificar-render") return App.VerifyRender();
+                if (a == "--verificar-fundo") return App.VerifyBackground();
+                if (a == "--exportar-png")
+                {
+                    App.ExportPng(args.Length > 1 ? args[args.Length - 1] : "previa.png");
+                    return 0;
+                }
                 if (a == "--testar-camera") return TestCamera();
             }
             return new App().Run();

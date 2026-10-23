@@ -1,6 +1,6 @@
-# Partículas 3D: guia de gestos
+﻿# Partículas 3D: guia de gestos
 
-Ao abrir `Particulas.exe`, milhares de pontos flutuam num céu estrelado e a webcam liga
+Ao abrir `Particulas.exe`, 9.600 pontos flutuam diante da Via Láctea e a webcam liga
 sozinha (uns 5 segundos). Há **três jeitos** de formar objetos:
 
 1. **Pose da mão:** faça a pose e **segure ~meio segundo**. A barra do painel "câmera"
@@ -35,6 +35,11 @@ sozinha (uns 5 segundos). Há **três jeitos** de formar objetos:
 As formas fechadas (coração, círculos, estrela, quadrado, losango, triângulo, ∞, 8) podem
 ser desenhadas começando em qualquer ponto e em qualquer sentido.
 
+**Tempo entre trocas: 6 segundos.** Depois que uma forma aparece, a próxima troca só é
+liberada 6 s depois. Se você já estiver segurando a nova pose, ela entra assim que liberar
+(o painel mostra `aguarde X s` com uma barra azul). Traços e passadas feitos durante a
+espera são ignorados, com um aviso na tela.
+
 ## Controles 3D e efeitos
 
 | Gesto | Efeito |
@@ -56,8 +61,13 @@ Teclado: `H` abre o guia na tela (2 páginas) e `Q`/`Esc` sai.
 - Iluminação por superfície: cada ponto sabe para onde sua superfície aponta (normal) e
   recebe luz difusa e **brilho especular**. As formas parecem sólidas.
 - **Oclusão:** o que está atrás de uma superfície quase não aparece.
+- **Pontilhado por sombreamento:** as figuras continuam feitas de pontos. Nas partes
+  iluminadas, as células têm mais pontos acesos, e nas sombras têm menos (como uma gravura
+  pontilhista). Assim o volume aparece sem virar bloco sólido.
 - **Perspectiva e neblina de profundidade:** o que está longe fica menor e mais escuro.
-- **Céu estrelado com paralaxe**, que gira devagar com a câmera.
+- **Céu de fundo nítido:** Via Láctea atravessando a tela, com nebulosa colorida e uma
+  faixa escura de poeira, uma galáxia distante tipo Andrômeda e ~3.500 estrelas com cores
+  de temperatura. O céu se move com **paralaxe quando você gira o objeto com a mão**.
 - Formas volumétricas e animadas: o coração é uma superfície implícita 3D, os elétrons
   orbitam o núcleo, a Lua orbita a Terra, a galáxia tem rotação diferencial, o tornado gira
   mais rápido embaixo e as ondas se movem.
@@ -86,6 +96,8 @@ Para recompilar o `.exe`, use `build.bat` (usa o compilador C# que já vem no Wi
 | `Particulas.exe --selftest` | testa o reconhecedor de traços (1.680 traços sintéticos) |
 | `Particulas.exe --benchmark` | mede ms por quadro e KB enviados ao terminal |
 | `Particulas.exe --verificar-render` | confere a saída diferencial com um terminal virtual |
+| `Particulas.exe --verificar-fundo` | mede se o céu atrapalha as figuras (contraste, estrelas no contorno e nos vãos) |
+| `Particulas.exe --exportar-png arquivo.png` | salva uma imagem com 6 figuras como aparecem no terminal |
 | `Particulas.exe --preview` | imprime uma prévia em texto das 18 formas |
 | `…\python.exe maos.py --autoteste` | testa o classificador de poses com mãos sintéticas |
 | `…\python.exe maos.py --modelo …\hand_landmarker.task --debug` | janela da câmera com a pose escrita sobre a mão |
