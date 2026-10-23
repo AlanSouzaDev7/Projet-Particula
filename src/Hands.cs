@@ -12,6 +12,9 @@ namespace Particulas
     {
         public string Pose;
         public char Side;                                // 'L' ou 'R' (só para identificar a mão)
+        public double Conf;                              // confiança da pose (0..1)
+        public string Alt;                               // pose mais provável (mesmo se Pose = "outra")
+        public string Quality;                           // "ok", "longe" ou "borda"
         public double Cx, Cy, Size;                      // centro da palma (0..1, espelhado) e tamanho
         public double PinchX, PinchY;                    // ponto entre o polegar e o indicador
         public double TipX, TipY;                        // ponta do indicador
@@ -27,10 +30,11 @@ namespace Particulas
 
     // Inicia o maos.py (Python + MediaPipe) e lê, em segundo plano, as mãos que ele detecta.
     // Protocolo (uma linha por quadro):
-    //   F <n> <duo>|<pose> <lado> <cx> <cy> <tam> <pinçaX> <pinçaY> <pontaX> <pontaY> <x0> <y0> ... <x20> <y20>|...
+    //   F <n> <duo>|<pose> <lado> <conf> <provável> <qualidade> <cx> <cy> <tam> <pinçaX> <pinçaY>
+    //               <pontaX> <pontaY> <x0> <y0> ... <x20> <y20>|...
     sealed class HandTracker : IDisposable
     {
-        const int Fields = 9 + 42;
+        const int Fields = 12 + 42;
         readonly object gate = new object();
         readonly Stopwatch clock = Stopwatch.StartNew();
         Process proc;
@@ -39,9 +43,11 @@ namespace Particulas
         volatile string status = "iniciando a câmera...";
         volatile bool ready, failed;
         volatile string lastError = "";
+        volatile string simTruth = "";
         int framesReceived;
 
         public string LastError { get { return lastError; } }
+        public string SimTruth { get { return simTruth; } }      // pose que a simulação está enviando
         public string Status { get { return status; } }
         public bool Ready { get { return ready; } }
         public bool Failed { get { return failed; } }
@@ -52,19 +58,21 @@ namespace Particulas
             get { return Path.Combine(Environment.GetFolderPath(Environment.SpecialFolder.LocalApplicationData), "Particulas"); }
         }
 
-        public void Start()
+        // simulate = true: o rastreador não usa a câmera e envia mãos sintéticas em todas as poses
+        public void Start(bool simulate = false)
         {
             string python = Path.Combine(Home, @"venv\Scripts\python.exe");
             string model = Path.Combine(Home, "hand_landmarker.task");
             string script = Path.Combine(AppDomain.CurrentDomain.BaseDirectory, "maos.py");
             if (!File.Exists(script)) script = Path.Combine(Home, "maos.py");
-            if (!File.Exists(python) || !File.Exists(script) || !File.Exists(model))
+            if (!File.Exists(python) || !File.Exists(script) || (!simulate && !File.Exists(model)))
             {
                 Fail("câmera desligada: rode instalar.bat");
                 return;
             }
 
-            var psi = new ProcessStartInfo(python, "-u \"" + script + "\" --modelo \"" + model + "\"");
+            var psi = new ProcessStartInfo(python, "-u \"" + script + "\" " +
+                (simulate ? "--simular" : "--modelo \"" + model + "\""));
             psi.UseShellExecute = false;
             psi.CreateNoWindow = true;
             psi.RedirectStandardInput = true;    // isola o Python da entrada do console deste programa
@@ -122,17 +130,19 @@ namespace Particulas
                     var h = new Hand
                     {
                         Pose = t[0], Side = t[1].Length > 0 ? t[1][0] : '?',
-                        Cx = Num(t[2]), Cy = Num(t[3]), Size = Num(t[4]),
-                        PinchX = Num(t[5]), PinchY = Num(t[6]), TipX = Num(t[7]), TipY = Num(t[8]),
+                        Conf = Num(t[2]), Alt = t[3], Quality = t[4],
+                        Cx = Num(t[5]), Cy = Num(t[6]), Size = Num(t[7]),
+                        PinchX = Num(t[8]), PinchY = Num(t[9]), TipX = Num(t[10]), TipY = Num(t[11]),
                     };
-                    for (int j = 0; j < 42; j++) h.Pts[j] = Num(t[9 + j]);
+                    for (int j = 0; j < 42; j++) h.Pts[j] = Num(t[12 + j]);
                     frame.Hands.Add(h);
                 }
                 lock (gate) { latest = frame; stamp = clock.Elapsed.TotalSeconds; }
                 Interlocked.Increment(ref framesReceived);
                 if (!ready) { ready = true; status = "câmera ativa"; }
             }
-            else if (line.StartsWith("OK")) { ready = true; status = "câmera ativa"; }
+            else if (line.StartsWith("OK")) { ready = true; status = line.Contains("simulacao") ? "simulação" : "câmera ativa"; }
+            else if (line.StartsWith("S ")) simTruth = line.Substring(2).Trim();
             else if (line.StartsWith("ERR ")) Fail(line.Substring(4));
         }
 

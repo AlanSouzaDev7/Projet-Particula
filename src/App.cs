@@ -1,4 +1,4 @@
-﻿using System;
+using System;
 using System.Collections.Generic;
 using System.Diagnostics;
 using System.IO;
@@ -13,7 +13,7 @@ namespace Particulas
         const string ESC = "\u001b";
         const double Dt = 1.0 / 40.0;
         public const int ParticleCount = 9600;
-        const double ShapeLockSeconds = 6.0;            // tempo mínimo entre uma troca de forma e outra
+        const double ShapeLockSeconds = 4.3;            // tempo mínimo entre uma troca de forma e outra
 
         readonly Shape[] shapes = Shapes.All();
         readonly Sim sim = new Sim(ParticleCount);
@@ -42,7 +42,13 @@ namespace Particulas
         bool leftDown, rightDown;
 
         // ---- mãos (câmera) ----
-        const double HoldSeconds = 0.45;                // tempo segurando a pose para confirmar
+        // Tempo segurando a pose para confirmar: curto quando o rastreador tem certeza,
+        // mais longo quando a pose está duvidosa (evita disparos por engano)
+        double poseConf;
+        double HoldNeeded
+        {
+            get { return poseConf >= 0.75 ? 0.32 : (poseConf >= 0.5 ? 0.45 : 0.6); }
+        }
         readonly HandTracker tracker = new HandTracker();
         HandFrame frame = HandFrame.Empty;
         Hand main;
@@ -392,13 +398,16 @@ namespace Particulas
             else { fX.Reset(); fY.Reset(); fPX.Reset(); fPY.Reset(); }
 
             string pose = frame.Duo != "-" ? frame.Duo : (main != null ? main.Pose : "");
+            double conf = main != null ? main.Conf : 0;
+            if (frame.Duo != "-") foreach (var h in frame.Hands) conf = Math.Min(conf, h.Conf);
+            poseConf += (conf - poseConf) * 0.3;
 
             // Segurar a pose por um instante confirma o gesto (evita disparos no meio de transições)
             if (pose == holdPose) holdTime += Dt;
             else { holdPose = pose; holdTime = 0; holdFired = false; }
-            // Se a forma mudou há menos de 6 s, a pose fica "na fila": dispara quando a trava
+            // Se a forma mudou há menos de 4,3 s, a pose fica "na fila": dispara quando a trava
             // acabar, desde que continue sendo feita (o painel mostra a contagem regressiva)
-            if (!holdFired && holdTime >= HoldSeconds && !(WouldChange(pose) && LockRemaining > 0))
+            if (!holdFired && holdTime >= HoldNeeded && !(WouldChange(pose) && LockRemaining > 0))
             {
                 int idx;
                 if (PoseToShape.TryGetValue(pose, out idx))
@@ -635,7 +644,20 @@ namespace Particulas
             }
 
             // Pose atual + barra de confirmação
+            // Dicas quando a câmera não consegue decidir: mão longe, cortada ou pose ambígua
+            string hint = null;
+            if (main != null && main.Quality == "longe") hint = "aproxime a mão da câmera";
+            else if (main != null && main.Quality == "borda") hint = "mão saindo da imagem";
+            else if (main != null && main.Pose == "outra" && frame.Duo == "-" && main.Alt != "outra" && main.Alt != null)
+                hint = "parece " + PoseLabel(main.Alt) + "? firme a pose";
+            if (hint != null)
+            {
+                rend.Put(ix + 1, y0 + ph - 2, (hint.Length > iw - 2 ? hint.Substring(0, iw - 2) : hint).PadRight(iw - 2), 0xFFB070, bg);
+            }
+
             string label = PoseLabel(holdPose);
+            if (main != null && label.Length > 0 && label != "?")
+                label += " " + (int)Math.Round(poseConf * 100) + "%";
             int target;
             if (PoseToShape.TryGetValue(holdPose, out target)) label += " → " + shapes[target].Name;
             else if (holdPose == "punho") label += " → espalhar";
@@ -655,7 +677,7 @@ namespace Particulas
             }
             else if (actionable)
             {
-                int filled = holdFired ? barW : (int)(barW * Math.Min(1, holdTime / HoldSeconds));
+                int filled = holdFired ? barW : (int)(barW * Math.Min(1, holdTime / HoldNeeded));
                 rend.Put(ix + 1, y0 + ph - 2, new string('█', filled) + new string('░', barW - filled),
                          holdFired ? 0x7CFFB2 : 0xFFD27A, bg);
             }
@@ -732,7 +754,7 @@ namespace Particulas
                 lines.Add("  Punho fechado ......... espalha os pontos");
                 lines.Add("  Punho → abrir rápido .. EXPLOSÃO");
                 lines.Add("");
-                lines.Add("  Depois de uma troca, a próxima só é liberada após 6 s");
+                lines.Add("  Depois de uma troca, a próxima só é liberada após 4,3 s");
                 lines.Add("  (segure a nova pose: ela entra assim que liberar)");
                 lines.Add("");
                 lines.Add("  Traços: linha → ← troca, ↓ espalha, ↑ reúne");

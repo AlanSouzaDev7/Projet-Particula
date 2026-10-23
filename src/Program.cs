@@ -1,4 +1,4 @@
-﻿// =====================================================================================
+// =====================================================================================
 //  Partículas 3D — pontos que se transformam em objetos a partir de gestos da mão
 //  (câmera), traços desenhados no ar ou com o mouse.
 //
@@ -33,9 +33,64 @@ namespace Particulas
                     App.ExportPng(args.Length > 1 ? args[args.Length - 1] : "previa.png");
                     return 0;
                 }
-                if (a == "--testar-camera") return TestCamera();
+                if (a == "--testar-camera")
+                    return Array.IndexOf(args, "--simular") >= 0 ? TestSimulated() : TestCamera();
             }
             return new App().Run();
+        }
+
+        // Integração completa sem câmera: o rastreador envia mãos sintéticas pose por pose
+        // (avisando qual está enviando) e conferimos o que chega aqui, já interpretado.
+        static int TestSimulated()
+        {
+            Console.OutputEncoding = new UTF8Encoding(false);
+            using (var t = new HandTracker())
+            {
+                t.Start(true);
+                var sw = Stopwatch.StartNew();
+                string truth = "";
+                double since = 0;
+                var total = new SortedDictionary<string, int>();
+                var right = new SortedDictionary<string, int>();
+                var wrong = new SortedDictionary<string, string>();
+                double confSum = 0;
+                int confN = 0;
+                while (sw.Elapsed.TotalSeconds < 60 && !t.Failed)
+                {
+                    if (t.SimTruth != truth) { truth = t.SimTruth; since = sw.Elapsed.TotalSeconds; }
+                    double age;
+                    HandFrame f = t.Snapshot(out age);
+                    // Ignora o primeiro meio segundo de cada pose (a fusão temporal ainda está trocando)
+                    if (truth.Length > 0 && age < 0.3 && f.Hands.Count > 0 && sw.Elapsed.TotalSeconds - since > 0.5)
+                    {
+                        Hand h = f.Hands[0];
+                        int c;
+                        total.TryGetValue(truth, out c); total[truth] = c + 1;
+                        if (h.Pose == truth)
+                        {
+                            right.TryGetValue(truth, out c); right[truth] = c + 1;
+                            confSum += h.Conf; confN++;
+                        }
+                        else wrong[truth] = h.Pose + (h.Quality != "ok" ? "/" + h.Quality : "");
+                    }
+                    Thread.Sleep(40);
+                }
+                int all = 0, ok = 0;
+                foreach (var kv in total)
+                {
+                    int r;
+                    right.TryGetValue(kv.Key, out r);
+                    all += kv.Value; ok += r;
+                    string w;
+                    wrong.TryGetValue(kv.Key, out w);
+                    Console.WriteLine("  " + kv.Key.PadRight(10) + (100.0 * r / kv.Value).ToString("0").PadLeft(4) + "%" +
+                                      (w != null && r < kv.Value ? "   (às vezes: " + w + ")" : ""));
+                }
+                Console.WriteLine("poses simuladas: " + total.Count + "   acerto após estabilizar: " +
+                                  (100.0 * ok / Math.Max(1, all)).ToString("0.0") + "%   confiança média: " +
+                                  (100.0 * confSum / Math.Max(1, confN)).ToString("0") + "%");
+                return total.Count >= 17 && ok >= 0.9 * all ? 0 : 1;
+            }
         }
 
         // Liga o rastreador por alguns segundos e mostra o que chega dele (sem abrir a animação)

@@ -1,4 +1,4 @@
-﻿# Partículas 3D: guia de gestos
+# Partículas 3D: guia de gestos
 
 Ao abrir `Particulas.exe`, 9.600 pontos flutuam diante da Via Láctea e a webcam liga
 sozinha (uns 5 segundos). Há **três jeitos** de formar objetos:
@@ -35,8 +35,8 @@ sozinha (uns 5 segundos). Há **três jeitos** de formar objetos:
 As formas fechadas (coração, círculos, estrela, quadrado, losango, triângulo, ∞, 8) podem
 ser desenhadas começando em qualquer ponto e em qualquer sentido.
 
-**Tempo entre trocas: 6 segundos.** Depois que uma forma aparece, a próxima troca só é
-liberada 6 s depois. Se você já estiver segurando a nova pose, ela entra assim que liberar
+**Tempo entre trocas: 4,3 segundos.** Depois que uma forma aparece, a próxima troca só é
+liberada 4,3 s depois. Se você já estiver segurando a nova pose, ela entra assim que liberar
 (o painel mostra `aguarde X s` com uma barra azul). Traços e passadas feitos durante a
 espera são ignorados, com um aviso na tela.
 
@@ -72,6 +72,21 @@ Teclado: `H` abre o guia na tela (2 páginas) e `Q`/`Esc` sai.
   orbitam o núcleo, a Lua orbita a Terra, a galáxia tem rotação diferencial, o tornado gira
   mais rápido embaixo e as ondas se movem.
 
+## Como a câmera reconhece as poses
+
+- Cada detalhe da mão (cada dedo esticado ou dobrado, polegar para fora, pinça, abertura
+  do Spock, direção do joinha) vira uma **probabilidade**, calculada pelos ângulos das juntas
+  em 3D. Cada pose recebe uma pontuação.
+- As pontuações são **acumuladas ao longo dos quadros**: um quadro tremido ou ambíguo é
+  resolvido pelos vizinhos, e a pose só troca quando a nova tem folga clara.
+- Se a decisão ficar **ambígua**, o programa não chuta: o painel mostra "parece V? firme a
+  pose". Mão **longe** ou **cortada na borda** também gera aviso em vez de palpite.
+- O tempo para confirmar se ajusta à certeza: ~0,3 s quando a pose está clara e ~0,6 s
+  quando está duvidosa. O painel mostra a confiança em %.
+
+Em testes com mãos sintéticas "difíceis" (dedos relaxados, mão inclinada, ruído), a pose
+correta ficou estável em 97% do tempo (antes 70%), e a forma errada disparou bem menos.
+
 ## Dicas para a câmera reconhecer bem
 
 - Fique a uns **40–80 cm** da câmera, com a **palma virada para ela** e boa luz.
@@ -93,6 +108,7 @@ Para recompilar o `.exe`, use `build.bat` (usa o compilador C# que já vem no Wi
 | Comando | O que faz |
 |---|---|
 | `Particulas.exe --testar-camera` | liga o rastreador e mostra FPS e poses vistas |
+| `Particulas.exe --testar-camera --simular` | sem câmera: o rastreador envia mãos sintéticas das 17 poses e o app confere cada uma |
 | `Particulas.exe --selftest` | testa o reconhecedor de traços (1.680 traços sintéticos) |
 | `Particulas.exe --benchmark` | mede ms por quadro e KB enviados ao terminal |
 | `Particulas.exe --verificar-render` | confere a saída diferencial com um terminal virtual |
