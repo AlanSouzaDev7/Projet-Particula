@@ -8,6 +8,10 @@
 //    Particulas.exe --selftest       -> testa o reconhecedor de traços
 //    Particulas.exe --benchmark      -> mede o custo por quadro e a banda enviada ao terminal
 //    Particulas.exe --preview        -> imprime uma prévia em texto de cada forma
+//    Particulas.exe --testar-camera --simular  -> integração completa com mãos sintéticas
+//    Particulas.exe --verificar-render         -> confere a saída diferencial do terminal
+//    Particulas.exe --verificar-fundo          -> mede se o céu atrapalha as figuras
+//    Particulas.exe --exportar-png arquivo.png -> salva uma imagem com 6 figuras
 // =====================================================================================
 using System;
 using System.Collections.Generic;

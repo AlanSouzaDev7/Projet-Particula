@@ -93,8 +93,8 @@ a pose correta fica estável em 100% do tempo, com zero trocas indevidas.
 
 Cada mão é diferente: tem gente que não estica totalmente os dedos, que fecha o punho
 frouxo ou que abre pouco o polegar. Dê dois cliques em **`calibrar.bat`** (com o
-Particulas.exe fechado). Uma janela com a câmera pede as 17 poses, uma de cada vez: 3 s
-para se preparar e 3 s gravando.
+Particulas.exe fechado). Uma janela com a câmera pede as 17 poses, uma de cada vez: 6 s
+para ler e se preparar (a barra de espaço começa antes) e 3 s gravando.
 
 - Embaixo da imagem, um painel mostra **cada dedo ao vivo**: LEVANTAR/DOBRAR, em **verde** quando está
   certo e **vermelho** quando precisa ajustar. Ao ficar tudo verde aparece "POSE CERTA!".
@@ -158,3 +158,6 @@ Para recompilar o `.exe`, use `build.bat` (usa o compilador C# que já vem no Wi
 - `src/Recognizer.cs`: reconhecedor de traços ($1 + cantos + espiral)
 - `src/Hands.cs`: comunicação com o rastreador e filtro One Euro
 - `maos.py`: câmera + MediaPipe + classificação das poses
+
+Detalhes técnicos em [docs/ARQUITETURA.md](docs/ARQUITETURA.md) e a evolução do projeto em
+[docs/HISTORICO.md](docs/HISTORICO.md).

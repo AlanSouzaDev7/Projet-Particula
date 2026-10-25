@@ -18,7 +18,8 @@ Como a pose é decidida:
   * cada detalhe (dedo esticado, polegar para fora, pinça...) vira uma probabilidade, e cada
     pose uma pontuação; se a melhor não tiver folga sobre a segunda, a pose fica indefinida
     em vez de disparar a forma errada;
-  * fusão temporal: as pontuações se acumulam ao longo dos quadros (um quadro ambíguo é`n    resolvido pelos vizinhos), com histerese para trocar de pose e na pinça.
+  * fusão temporal: as pontuações se acumulam ao longo dos quadros (um quadro ambíguo é
+    resolvido pelos vizinhos), com histerese para trocar de pose e na pinça.
 
 Uso isolado:
   python maos.py --modelo hand_landmarker.task --debug     janela com a câmera e as poses

@@ -1,0 +1,14 @@
+# Dados pessoais da calibração (normalmente ficam em %LOCALAPPDATA%\Particulas)
+coleta-*.jsonl
+perfil.json
+
+# Python
+__pycache__/
+*.pyc
+venv/
+
+# Modelo do MediaPipe (baixado pelo instalar.bat)
+*.task
+
+# Imagens geradas por --exportar-png fora de docs/
+/previa.png
