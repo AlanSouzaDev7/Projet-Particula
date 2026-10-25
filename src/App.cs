@@ -13,7 +13,7 @@ namespace Particulas
         const string ESC = "\u001b";
         const double Dt = 1.0 / 40.0;
         public const int ParticleCount = 9600;
-        const double ShapeLockSeconds = 4.3;            // tempo mínimo entre uma troca de forma e outra
+        const double ShapeLockSeconds = 2.4;            // tempo mínimo entre uma troca de forma e outra
 
         readonly Shape[] shapes = Shapes.All();
         readonly Sim sim = new Sim(ParticleCount);
@@ -406,7 +406,7 @@ namespace Particulas
             // Segurar a pose por um instante confirma o gesto (evita disparos no meio de transições)
             if (pose == holdPose) holdTime += Dt;
             else { holdPose = pose; holdTime = 0; holdFired = false; }
-            // Se a forma mudou há menos de 4,3 s, a pose fica "na fila": dispara quando a trava
+            // Se a forma mudou há menos de 2,4 s, a pose fica "na fila": dispara quando a trava
             // acabar, desde que continue sendo feita (o painel mostra a contagem regressiva)
             if (!holdFired && holdTime >= HoldNeeded && !(WouldChange(pose) && LockRemaining > 0))
             {
@@ -755,7 +755,7 @@ namespace Particulas
                 lines.Add("  Punho fechado ......... espalha os pontos");
                 lines.Add("  Punho → abrir rápido .. EXPLOSÃO");
                 lines.Add("");
-                lines.Add("  Depois de uma troca, a próxima só é liberada após 4,3 s");
+                lines.Add("  Depois de uma troca, a próxima só é liberada após 2,4 s");
                 lines.Add("  (segure a nova pose: ela entra assim que liberar)");
                 lines.Add("");
                 lines.Add("  Traços: linha → ← troca, ↓ espalha, ↑ reúne");

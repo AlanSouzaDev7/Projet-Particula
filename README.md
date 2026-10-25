@@ -106,7 +106,7 @@ direito, enche e os pontos montam o objeto). Ou desenhe o traço no ar com a pin
 | Tornado | 👎 Negativo | letra V |
 | Ondas | Pistola (polegar + indicador + médio) | onda ~ |
 
-Depois que uma forma aparece, a próxima troca só é liberada após **4,3 segundos** (para
+Depois que uma forma aparece, a próxima troca só é liberada após **2,4 segundos** (para
 o objeto não ficar trocando sem querer). Se você já estiver segurando a nova pose, ela
 entra assim que o tempo acabar.
 
@@ -181,7 +181,7 @@ ambiente instalado: `%LOCALAPPDATA%\Particulas\venv\Scripts\python.exe`.
    cada pose uma pontuação; as pontuações se acumulam entre quadros e a pose só troca com
    folga clara. Na dúvida, o programa não chuta: mostra "parece V? firme a pose".
 2. **Aplicativo (`src/App.cs`):** confirma a pose segurada (0,3 a 0,6 s, conforme a
-   confiança), respeita a trava de 4,3 s, trata giro, zoom, explosão e desenho no ar.
+   confiança), respeita a trava de 2,4 s, trata giro, zoom, explosão e desenho no ar.
 3. **Simulação (`src/Sim.cs`):** cada partícula é puxada para seu alvo na forma por uma
    mola amortecida; as formas animadas movem os alvos (batimento, órbitas, rotação).
 4. **Renderização (`src/Renderer.cs`):** projeção em perspectiva, luz, oclusão por célula,

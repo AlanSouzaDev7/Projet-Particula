@@ -124,6 +124,11 @@ da lista de comandos no cabeçalho do `Program.cs`, e a documentação: `README.
 `docs/ARQUITETURA.md`, este histórico e a imagem `docs/formas.png`. Publicado em
 <https://github.com/AlanSouzaDev7/Projet-Particula>.
 
+## Etapa 6 — Trocas mais rápidas
+
+**Pedido:** diminuir o tempo para formar a próxima forma para 2,4 segundos. A trava entre
+uma troca e outra (`ShapeLockSeconds`) passou de 4,3 s para **2,4 s**.
+
 ## Números finais
 
 | Medida | Valor |

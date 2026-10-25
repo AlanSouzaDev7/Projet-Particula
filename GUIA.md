@@ -35,8 +35,8 @@ sozinha (uns 5 segundos). Há **três jeitos** de formar objetos:
 As formas fechadas (coração, círculos, estrela, quadrado, losango, triângulo, ∞, 8) podem
 ser desenhadas começando em qualquer ponto e em qualquer sentido.
 
-**Tempo entre trocas: 4,3 segundos.** Depois que uma forma aparece, a próxima troca só é
-liberada 4,3 s depois. Se você já estiver segurando a nova pose, ela entra assim que liberar
+**Tempo entre trocas: 2,4 segundos.** Depois que uma forma aparece, a próxima troca só é
+liberada 2,4 s depois. Se você já estiver segurando a nova pose, ela entra assim que liberar
 (o painel mostra `aguarde X s` com uma barra azul). Traços e passadas feitos durante a
 espera são ignorados, com um aviso na tela.
 

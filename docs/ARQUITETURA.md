@@ -76,7 +76,7 @@ csc /optimize+ /target:exe /platform:x64 /codepage:65001 /r:System.Drawing.dll
 2. **Gestos da mão:**
    - **Pose segurada:** a pose precisa ficar estável por `HoldNeeded`, que depende da
      confiança (≥ 0,75 → 0,32 s; ≥ 0,5 → 0,45 s; abaixo → 0,6 s). Aí `PoseToShape` dá a forma.
-   - **Trava de troca:** `ShapeLockSeconds = 4.3`. Durante a trava a pose nova fica na fila e
+   - **Trava de troca:** `ShapeLockSeconds = 2.4`. Durante a trava a pose nova fica na fila e
      entra quando liberar; traços e passadas feitos nesse tempo são ignorados, com aviso.
    - **Mão aberta = segurar:** guarda a posição da mão e o ângulo do objeto ao começar; mover
      a mão gira o objeto (yaw e tilt). Só nesse momento o céu ganha paralaxe.
